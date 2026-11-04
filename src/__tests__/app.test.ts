@@ -4,15 +4,34 @@ import { describe, it, expect } from 'vitest';
 // CONSTANTS & LOGIC TESTED (Mirroring App core logic)
 // -------------------------------------------------------------
 const ADMOB_CONFIG = {
-  appId: 'ca-app-pub-8825065858193656~5170875046',
-  rewardedAdUnitId: 'ca-app-pub-8825065858193656/9953437597',
-  appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
+  appId: 'ca-app-pub-8825065858193656~2430855580',
+  rewardedAdUnitId: 'ca-app-pub-8825065858193656~2572882851',
+  interstitialAdUnitId: 'ca-app-pub-8825065858193656~2381311165',
+  appOpenAdUnitId: 'ca-app-pub-8825065858193656~2381311165'
 };
+
+const LEGACY_RETIRED_ADMOB_IDS = new Set([
+  'ca-app-pub-8825065858193656~5170875046',
+  'ca-app-pub-8825065858193656/9953437597',
+  'ca-app-pub-8825065858193656~9953437597',
+  'ca-app-pub-8825065858193656/2956162280',
+  'ca-app-pub-8825065858193656~2956162280'
+]);
+
+function sanitizeAdMobId(rawId: any, fallbackId: string): string {
+  if (typeof rawId !== 'string') return fallbackId;
+  const cleaned = rawId.trim().replace(/[<>"'`;\\]/g, '');
+  if (!cleaned || LEGACY_RETIRED_ADMOB_IDS.has(cleaned)) return fallbackId;
+  if (!/^ca-app-pub-\d{16}[~/]\d+$/.test(cleaned)) return fallbackId;
+  return cleaned;
+}
 
 const DEFAULT_AD_CONFIG = {
   network: 'admob' as 'admob' | 'adsterra' | 'monetag',
+  appId: ADMOB_CONFIG.appId,
   rewardedAdUnitId: ADMOB_CONFIG.rewardedAdUnitId,
-  appOpenAdUnitId: ADMOB_CONFIG.appOpenAdUnitId,
+  interstitialAdUnitId: ADMOB_CONFIG.interstitialAdUnitId,
+  appOpenAdUnitId: ADMOB_CONFIG.interstitialAdUnitId,
   adsterraDirectLink: '',
   monetagZoneId: ''
 };
@@ -24,15 +43,38 @@ const PLAN_LIMITS: Record<string, number> = {
   ELITE: 20
 };
 
-// Pure function helper for merging ad config
+// Pure function helper for merging & sanitizing dynamic AdMob config
 function mergeAdConfig(prev: typeof DEFAULT_AD_CONFIG, fetched: any): typeof DEFAULT_AD_CONFIG {
   if (!fetched || typeof fetched !== 'object') return prev;
+  const rawNet = String(fetched.network || prev.network || DEFAULT_AD_CONFIG.network).toLowerCase();
+  const network: 'admob' | 'adsterra' | 'monetag' =
+    rawNet === 'adsterra' || rawNet === 'monetag' ? rawNet : 'admob';
+  const appId = sanitizeAdMobId(fetched.appId ?? prev.appId, ADMOB_CONFIG.appId);
+  const rewardedAdUnitId = sanitizeAdMobId(
+    fetched.rewardedAdUnitId ?? prev.rewardedAdUnitId,
+    ADMOB_CONFIG.rewardedAdUnitId
+  );
+  const rawInterstitial =
+    fetched.interstitialAdUnitId ||
+    fetched.appOpenAdUnitId ||
+    prev.interstitialAdUnitId ||
+    prev.appOpenAdUnitId;
+  const interstitialAdUnitId = sanitizeAdMobId(rawInterstitial, ADMOB_CONFIG.interstitialAdUnitId);
+
   return {
-    network: fetched.network || prev.network || DEFAULT_AD_CONFIG.network,
-    rewardedAdUnitId: fetched.rewardedAdUnitId || prev.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId,
-    appOpenAdUnitId: fetched.appOpenAdUnitId || prev.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId,
-    adsterraDirectLink: fetched.adsterraDirectLink !== undefined ? fetched.adsterraDirectLink : (prev.adsterraDirectLink || ''),
-    monetagZoneId: fetched.monetagZoneId !== undefined ? fetched.monetagZoneId : (prev.monetagZoneId || '')
+    network,
+    appId,
+    rewardedAdUnitId,
+    interstitialAdUnitId,
+    appOpenAdUnitId: interstitialAdUnitId,
+    adsterraDirectLink:
+      fetched.adsterraDirectLink !== undefined
+        ? String(fetched.adsterraDirectLink).trim()
+        : (prev.adsterraDirectLink || ''),
+    monetagZoneId:
+      fetched.monetagZoneId !== undefined
+        ? String(fetched.monetagZoneId).trim()
+        : (prev.monetagZoneId || '')
   };
 }
 
@@ -48,25 +90,44 @@ function computeSignalTargets(entry: number, direction: 'LONG' | 'SHORT', atrVal
 }
 
 describe('1. AdMob & Global Ad Config Tests (TDD & Edge Cases)', () => {
-  it('should have valid official AdMob App ID and Ad Unit IDs format', () => {
-    expect(ADMOB_CONFIG.appId).toMatch(/^ca-app-pub-\d+~\d+$/);
-    expect(ADMOB_CONFIG.rewardedAdUnitId).toMatch(/^ca-app-pub-\d+\/\d+$/);
-    expect(ADMOB_CONFIG.appOpenAdUnitId).toMatch(/^ca-app-pub-\d+\/\d+$/);
+  it('should integrate the exact approved AdMob App ID, Rewarded ID, and Interstitial ID', () => {
+    expect(ADMOB_CONFIG.appId).toBe('ca-app-pub-8825065858193656~2430855580');
+    expect(ADMOB_CONFIG.rewardedAdUnitId).toBe('ca-app-pub-8825065858193656~2572882851');
+    expect(ADMOB_CONFIG.interstitialAdUnitId).toBe('ca-app-pub-8825065858193656~2381311165');
+
+    expect(ADMOB_CONFIG.appId).toMatch(/^ca-app-pub-\d{16}[~/]\d+$/);
+    expect(ADMOB_CONFIG.rewardedAdUnitId).toMatch(/^ca-app-pub-\d{16}[~/]\d+$/);
+    expect(ADMOB_CONFIG.interstitialAdUnitId).toMatch(/^ca-app-pub-\d{16}[~/]\d+$/);
   });
 
   it('should default to AdMob as the primary monetization network', () => {
     expect(DEFAULT_AD_CONFIG.network).toBe('admob');
   });
 
-  it('should preserve fallback AdMob IDs when backend returns empty string IDs', () => {
+  it('should preserve fallback approved AdMob IDs when backend or admin returns empty or malformed IDs', () => {
     const emptyBackend = {
       network: 'admob',
+      appId: '',
       rewardedAdUnitId: '',
-      appOpenAdUnitId: ''
+      interstitialAdUnitId: '<script>alert(1)</script>'
     };
     const merged = mergeAdConfig(DEFAULT_AD_CONFIG, emptyBackend);
+    expect(merged.appId).toBe(ADMOB_CONFIG.appId);
     expect(merged.rewardedAdUnitId).toBe(ADMOB_CONFIG.rewardedAdUnitId);
-    expect(merged.appOpenAdUnitId).toBe(ADMOB_CONFIG.appOpenAdUnitId);
+    expect(merged.interstitialAdUnitId).toBe(ADMOB_CONFIG.interstitialAdUnitId);
+  });
+
+  it('should automatically upgrade legacy retired AdMob IDs cached in localStorage to the new approved IDs', () => {
+    const legacyCached = {
+      network: 'admob',
+      appId: 'ca-app-pub-8825065858193656~5170875046',
+      rewardedAdUnitId: 'ca-app-pub-8825065858193656/9953437597',
+      appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
+    };
+    const upgraded = mergeAdConfig(DEFAULT_AD_CONFIG, legacyCached);
+    expect(upgraded.appId).toBe('ca-app-pub-8825065858193656~2430855580');
+    expect(upgraded.rewardedAdUnitId).toBe('ca-app-pub-8825065858193656~2572882851');
+    expect(upgraded.interstitialAdUnitId).toBe('ca-app-pub-8825065858193656~2381311165');
   });
 
   it('should gracefully handle null or undefined backend responses', () => {
@@ -77,17 +138,19 @@ describe('1. AdMob & Global Ad Config Tests (TDD & Edge Cases)', () => {
     expect(mergedUndefined).toEqual(DEFAULT_AD_CONFIG);
   });
 
-  it('should properly apply updated Ad Unit IDs when Admin changes them globally', () => {
+  it('should properly apply updated App ID, Rewarded ID, and Interstitial ID when Admin changes them dynamically', () => {
     const adminCustomConfig = {
       network: 'admob' as const,
-      rewardedAdUnitId: 'ca-app-pub-9999999999999999/1111111111',
-      appOpenAdUnitId: 'ca-app-pub-9999999999999999/2222222222',
+      appId: 'ca-app-pub-8825065858193656~7777777777',
+      rewardedAdUnitId: 'ca-app-pub-8825065858193656~8888888888',
+      interstitialAdUnitId: 'ca-app-pub-8825065858193656/9999999999',
       adsterraDirectLink: '',
       monetagZoneId: ''
     };
     const merged = mergeAdConfig(DEFAULT_AD_CONFIG, adminCustomConfig);
-    expect(merged.rewardedAdUnitId).toBe('ca-app-pub-9999999999999999/1111111111');
-    expect(merged.appOpenAdUnitId).toBe('ca-app-pub-9999999999999999/2222222222');
+    expect(merged.appId).toBe('ca-app-pub-8825065858193656~7777777777');
+    expect(merged.rewardedAdUnitId).toBe('ca-app-pub-8825065858193656~8888888888');
+    expect(merged.interstitialAdUnitId).toBe('ca-app-pub-8825065858193656/9999999999');
   });
 });
 
@@ -184,27 +247,28 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.0.7', () => {
-    const current = '1.0.7';
+  it('should NOT trigger update popup when backend version is older than current 1.0.8', () => {
+    const current = '1.0.8';
     expect(compareVersions('1.0.1', current)).toBeLessThan(0);
     expect(compareVersions('1.0.2', current)).toBeLessThan(0);
     expect(compareVersions('1.0.3', current)).toBeLessThan(0);
     expect(compareVersions('1.0.4', current)).toBeLessThan(0);
     expect(compareVersions('1.0.5', current)).toBeLessThan(0);
     expect(compareVersions('1.0.6', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.6', current) > 0).toBe(false);
+    expect(compareVersions('1.0.7', current)).toBeLessThan(0);
+    expect(compareVersions('1.0.7', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.0.7', () => {
-    const current = '1.0.7';
-    const remoteSame = '1.0.7';
+  it('should NOT trigger update popup when backend version is identical to 1.0.8', () => {
+    const current = '1.0.8';
+    const remoteSame = '1.0.8';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.8 or 1.1.0)', () => {
-    const current = '1.0.7';
-    expect(compareVersions('1.0.8', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.9 or 1.1.0)', () => {
+    const current = '1.0.8';
+    expect(compareVersions('1.0.9', current)).toBe(1);
     expect(compareVersions('1.1.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
@@ -680,6 +744,51 @@ describe('11. Admin Premium Codes Google Sheet Sync & VIP Modal Scroll Rules', (
     expect(newCodes.filter(c => c.plan === 'BASIC').length).toBe(20);
     expect(newCodes.filter(c => c.plan === 'PRO').length).toBe(20);
     expect(newCodes.filter(c => c.plan === 'ELITE').length).toBe(20);
+  });
+});
+
+describe('12. AdMob app-ads.txt Verification & Publisher ID Consistency', () => {
+  it('should have a valid /public/app-ads.txt matching the AdMob publisher ID and IAB Tech Lab spec', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const appAdsPath = path.resolve(process.cwd(), 'public/app-ads.txt');
+    expect(fs.existsSync(appAdsPath)).toBe(true);
+
+    const content = fs.readFileSync(appAdsPath, 'utf-8').trim();
+    expect(content).toBe('google.com, pub-8825065858193656, DIRECT, f08c47fec0942fa0');
+
+    const parts = content.split(',').map((s: string) => s.trim());
+    expect(parts.length).toBe(4);
+    expect(parts[0]).toBe('google.com');
+    expect(parts[1]).toBe('pub-8825065858193656');
+    expect(parts[2]).toBe('DIRECT');
+    expect(parts[3]).toBe('f08c47fec0942fa0');
+  });
+
+  it('should have a valid /public/.well-known/ads.txt and /public/ads.txt for AdSense verification', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const wellKnownAdsPath = path.resolve(process.cwd(), 'public/.well-known/ads.txt');
+    const rootAdsPath = path.resolve(process.cwd(), 'public/ads.txt');
+
+    expect(fs.existsSync(wellKnownAdsPath)).toBe(true);
+    expect(fs.existsSync(rootAdsPath)).toBe(true);
+
+    const wellKnownContent = fs.readFileSync(wellKnownAdsPath, 'utf-8').trim();
+    const rootAdsContent = fs.readFileSync(rootAdsPath, 'utf-8').trim();
+
+    expect(wellKnownContent).toBe('google.com, pub-8825065858193656, DIRECT, f08c47fec0942fa0');
+    expect(rootAdsContent).toBe('google.com, pub-8825065858193656, DIRECT, f08c47fec0942fa0');
+  });
+
+  it('should configure AndroidManifest.xml with the official approved AdMob App ID ca-app-pub-8825065858193656~2430855580', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const manifestPath = path.resolve(process.cwd(), 'android/app/src/main/AndroidManifest.xml');
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    const manifestXml = fs.readFileSync(manifestPath, 'utf-8');
+    expect(manifestXml).toContain('com.google.android.gms.ads.APPLICATION_ID');
+    expect(manifestXml).toContain('ca-app-pub-8825065858193656~2430855580');
   });
 });
 

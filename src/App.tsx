@@ -43,7 +43,7 @@ import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.7';
+const CURRENT_APP_VERSION = '1.0.8';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -58,10 +58,27 @@ const compareVersions = (v1: string, v2: string): number => {
   return 0;
 };
 
-const ADMOB_CONFIG = {
-  appId: 'ca-app-pub-8825065858193656~5170875046',
-  rewardedAdUnitId: 'ca-app-pub-8825065858193656/9953437597',
-  appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
+export const ADMOB_CONFIG = {
+  appId: 'ca-app-pub-8825065858193656~2430855580',
+  rewardedAdUnitId: 'ca-app-pub-8825065858193656~2572882851',
+  interstitialAdUnitId: 'ca-app-pub-8825065858193656~2381311165',
+  appOpenAdUnitId: 'ca-app-pub-8825065858193656~2381311165'
+};
+
+const LEGACY_RETIRED_ADMOB_IDS = new Set([
+  'ca-app-pub-8825065858193656~5170875046',
+  'ca-app-pub-8825065858193656/9953437597',
+  'ca-app-pub-8825065858193656~9953437597',
+  'ca-app-pub-8825065858193656/2956162280',
+  'ca-app-pub-8825065858193656~2956162280'
+]);
+
+export const sanitizeAdMobId = (rawId: any, fallbackId: string): string => {
+  if (typeof rawId !== 'string') return fallbackId;
+  const cleaned = rawId.trim().replace(/[<>"'`;\\]/g, '');
+  if (!cleaned || LEGACY_RETIRED_ADMOB_IDS.has(cleaned)) return fallbackId;
+  if (!/^ca-app-pub-\d{16}[~/]\d+$/.test(cleaned)) return fallbackId;
+  return cleaned;
 };
 
 // Obfuscated internal vault resolver (never exposed in UI or plain-text source)
@@ -94,12 +111,48 @@ const KEYS = {
   AD_CONFIG: 'cw_ad_network_config'
 };
 
-const DEFAULT_AD_CONFIG = {
+export const DEFAULT_AD_CONFIG = {
   network: 'admob' as 'admob' | 'adsterra' | 'monetag',
+  appId: ADMOB_CONFIG.appId,
   rewardedAdUnitId: ADMOB_CONFIG.rewardedAdUnitId,
-  appOpenAdUnitId: ADMOB_CONFIG.appOpenAdUnitId,
+  interstitialAdUnitId: ADMOB_CONFIG.interstitialAdUnitId,
+  appOpenAdUnitId: ADMOB_CONFIG.interstitialAdUnitId,
   adsterraDirectLink: '',
   monetagZoneId: ''
+};
+
+export const mergeAdConfig = (prev: typeof DEFAULT_AD_CONFIG, fetched: any): typeof DEFAULT_AD_CONFIG => {
+  if (!fetched || typeof fetched !== 'object') return prev;
+  const rawNet = String(fetched.network || prev.network || DEFAULT_AD_CONFIG.network).toLowerCase();
+  const network: 'admob' | 'adsterra' | 'monetag' =
+    rawNet === 'adsterra' || rawNet === 'monetag' ? rawNet : 'admob';
+  const appId = sanitizeAdMobId(fetched.appId ?? prev.appId, ADMOB_CONFIG.appId);
+  const rewardedAdUnitId = sanitizeAdMobId(
+    fetched.rewardedAdUnitId ?? prev.rewardedAdUnitId,
+    ADMOB_CONFIG.rewardedAdUnitId
+  );
+  const rawInterstitial =
+    fetched.interstitialAdUnitId ||
+    fetched.appOpenAdUnitId ||
+    prev.interstitialAdUnitId ||
+    prev.appOpenAdUnitId;
+  const interstitialAdUnitId = sanitizeAdMobId(rawInterstitial, ADMOB_CONFIG.interstitialAdUnitId);
+
+  return {
+    network,
+    appId,
+    rewardedAdUnitId,
+    interstitialAdUnitId,
+    appOpenAdUnitId: interstitialAdUnitId,
+    adsterraDirectLink:
+      fetched.adsterraDirectLink !== undefined
+        ? String(fetched.adsterraDirectLink).trim()
+        : (prev.adsterraDirectLink || ''),
+    monetagZoneId:
+      fetched.monetagZoneId !== undefined
+        ? String(fetched.monetagZoneId).trim()
+        : (prev.monetagZoneId || '')
+  };
 };
 
 const PLAN_LIMITS: Record<string, number> = {
@@ -365,7 +418,7 @@ export default function App() {
   const [adminAdSettings, setAdminAdSettings] = useState(() => {
     try {
       const saved = localStorage.getItem(KEYS.AD_CONFIG);
-      return saved ? { ...DEFAULT_AD_CONFIG, ...JSON.parse(saved) } : DEFAULT_AD_CONFIG;
+      return saved ? mergeAdConfig(DEFAULT_AD_CONFIG, JSON.parse(saved)) : DEFAULT_AD_CONFIG;
     } catch {
       return DEFAULT_AD_CONFIG;
     }
@@ -408,20 +461,25 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [redeemCode, setRedeemCode] = useState('');
 
-  // Google AdMob Real Video Ads State
+  // Google AdMob Real Video & Interstitial Ads State
   const [isAdLoading, setIsAdLoading] = useState(false);
+  const [isInterstitialLoading, setIsInterstitialLoading] = useState(false);
   const [adConfig, setAdConfig] = useState(() => {
     try {
       const saved = localStorage.getItem(KEYS.AD_CONFIG);
-      return saved ? { ...DEFAULT_AD_CONFIG, ...JSON.parse(saved) } : DEFAULT_AD_CONFIG;
+      const merged = saved ? mergeAdConfig(DEFAULT_AD_CONFIG, JSON.parse(saved)) : DEFAULT_AD_CONFIG;
+      localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(merged));
+      return merged;
     } catch {
       return DEFAULT_AD_CONFIG;
     }
   });
 
   const saveAdConfig = (newConfig: typeof DEFAULT_AD_CONFIG) => {
-    setAdConfig(newConfig);
-    localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(newConfig));
+    const merged = mergeAdConfig(DEFAULT_AD_CONFIG, newConfig);
+    setAdConfig(merged);
+    setAdminAdSettings(merged);
+    localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(merged));
     showToast('AdMob settings mehfooz ho gayi hain!', 'success');
   };
 
@@ -565,27 +623,15 @@ export default function App() {
   const fetchGlobalAdConfig = useCallback(async () => {
     try {
       const res = await callBackend('get_ad_config');
-      const fetched = res?.config || (res?.network ? res : null);
+      const fetched = res?.config || (res?.network || res?.appId || res?.rewardedAdUnitId || res?.interstitialAdUnitId ? res : null);
       if (fetched && !res.error) {
         setAdConfig((prev: typeof DEFAULT_AD_CONFIG) => {
-          const merged: typeof DEFAULT_AD_CONFIG = {
-            network: fetched.network || prev.network || DEFAULT_AD_CONFIG.network,
-            rewardedAdUnitId: fetched.rewardedAdUnitId || prev.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId,
-            appOpenAdUnitId: fetched.appOpenAdUnitId || prev.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId,
-            adsterraDirectLink: fetched.adsterraDirectLink !== undefined ? fetched.adsterraDirectLink : (prev.adsterraDirectLink || ''),
-            monetagZoneId: fetched.monetagZoneId !== undefined ? fetched.monetagZoneId : (prev.monetagZoneId || '')
-          };
+          const merged = mergeAdConfig(prev, fetched);
           localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(merged));
           return merged;
         });
 
-        setAdminAdSettings((prev: typeof DEFAULT_AD_CONFIG) => ({
-          network: fetched.network || prev.network || DEFAULT_AD_CONFIG.network,
-          rewardedAdUnitId: fetched.rewardedAdUnitId || prev.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId,
-          appOpenAdUnitId: fetched.appOpenAdUnitId || prev.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId,
-          adsterraDirectLink: fetched.adsterraDirectLink !== undefined ? fetched.adsterraDirectLink : (prev.adsterraDirectLink || ''),
-          monetagZoneId: fetched.monetagZoneId !== undefined ? fetched.monetagZoneId : (prev.monetagZoneId || '')
-        }));
+        setAdminAdSettings((prev: typeof DEFAULT_AD_CONFIG) => mergeAdConfig(prev, fetched));
       }
     } catch (e) {
       console.warn('[AdConfig] Global config fetch fallback to local/defaults:', e);
@@ -1243,6 +1289,40 @@ export default function App() {
   }, [callBackend, fetchMarketTickers]);
 
   // -------------------------------------------------------------
+  // IN-APP UPDATE CHECKER (FEATURE 1)
+  // -------------------------------------------------------------
+  const checkAppVersion = useCallback(async () => {
+    try {
+      const res: any = await callBackend('check_app_version', { currentVersion: CURRENT_APP_VERSION });
+      const latest = String(
+        res?.latest_version ||
+        res?.latestVersion ||
+        res?.version ||
+        res?.LATEST_APP_VERSION ||
+        res?.appVersion ||
+        res?.data?.latestVersion ||
+        res?.data?.latest_version ||
+        ''
+      ).trim();
+      if (latest && compareVersions(latest, CURRENT_APP_VERSION) > 0) {
+        setUpdateData({
+          downloadUrl: res.download_url || res.downloadUrl || res.url || 'https://cryptoworld.vip/download',
+          latestVersion: latest,
+          releaseNotes:
+            res.release_notes ||
+            res.releaseNotes ||
+            res.notes ||
+            res.message ||
+            'CryptoWorld ka naya version release ho chuka hai! Behtar Binance data stream aur VIP features shamil hain.'
+        });
+        setUpdateModalOpen(true);
+      }
+    } catch (err) {
+      console.warn('App version check fallback:', err);
+    }
+  }, [callBackend]);
+
+  // -------------------------------------------------------------
   // REAL SYNC INITIALIZATION SEQUENCE (FAST BOOT - NO STUCK)
   // -------------------------------------------------------------
   useEffect(() => {
@@ -1267,33 +1347,42 @@ export default function App() {
     fetchMarketTickers();
     fetchSheetAccuracy();
     fetchGlobalAdConfig();
+    checkAppVersion();
 
-    // Re-sync Global Settings & Open Signals from Google Sheet when app returns from background to foreground
+    // Re-sync Global Settings, App Version & Open Signals from Google Sheet when app returns from background to foreground
     const handleAppForeground = () => {
       if (document.visibilityState === 'visible') {
         fetchGlobalAdConfig();
         fetchOpenSignalsFromSheet();
+        checkAppVersion();
       }
     };
     document.addEventListener('visibilitychange', handleAppForeground);
     window.addEventListener('focus', handleAppForeground);
 
-    // Initialize Google AdMob & Non-blocking App Open Ad on Native Android
+    // Initialize Google AdMob & Non-blocking Interstitial Ad on Native Android
     if (Capacitor.isNativePlatform()) {
       (async () => {
         try {
           await AdMob.initialize({
             initializeForTesting: false
           });
-          console.log('[AdMob] Google Mobile Ads SDK initialized successfully');
+          console.log('[AdMob] Google Mobile Ads SDK initialized with App ID:', adConfig.appId || ADMOB_CONFIG.appId);
 
-          // Load & show App Open Ad asynchronously without blocking startup
-          const openAdId = adConfig.appOpenAdUnitId || ADMOB_CONFIG.appOpenAdUnitId;
+          // Load & show Interstitial Ad asynchronously using dynamic Admin-configured Unit ID
+          const rawInterstitialId = adConfig.interstitialAdUnitId || adConfig.appOpenAdUnitId || ADMOB_CONFIG.interstitialAdUnitId;
           try {
-            await AdMob.loadAppOpen({ adId: openAdId });
-            await AdMob.showAppOpen();
-          } catch (openErr) {
-            console.log('[AdMob] App Open Ad skipped or unavailable:', openErr);
+            await AdMob.prepareInterstitial({ adId: rawInterstitialId });
+            await AdMob.showInterstitial();
+          } catch {
+            // Automatic fallback if native SDK requires slash separator for Ad Unit ID
+            const normalizedSlashId = rawInterstitialId.replace('~', '/');
+            try {
+              await AdMob.prepareInterstitial({ adId: normalizedSlashId });
+              await AdMob.showInterstitial();
+            } catch (interstitialErr) {
+              console.log('[AdMob] Startup Interstitial Ad skipped or unavailable:', interstitialErr);
+            }
           }
         } catch (adInitErr) {
           console.warn('[AdMob] Initialization warning:', adInitErr);
@@ -1310,7 +1399,7 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleAppForeground);
       window.removeEventListener('focus', handleAppForeground);
     };
-  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, adConfig.appOpenAdUnitId]);
+  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, checkAppVersion, adConfig.appId, adConfig.interstitialAdUnitId, adConfig.appOpenAdUnitId]);
 
   // Sync with Google Sheet when user changes/logs in
   useEffect(() => {
@@ -1351,28 +1440,6 @@ export default function App() {
         }
       });
   }, [user?.username, callBackend]);
-
-  // -------------------------------------------------------------
-  // IN-APP UPDATE CHECKER (FEATURE 1)
-  // -------------------------------------------------------------
-  useEffect(() => {
-    callBackend('check_app_version', { currentVersion: CURRENT_APP_VERSION })
-      .then((res: any) => {
-        const latest = res?.latest_version || res?.latestVersion || res?.version;
-        // Strictly only show update modal if latest version is newer than current 1.0.2
-        if (latest && compareVersions(latest, CURRENT_APP_VERSION) > 0) {
-          setUpdateData({
-            downloadUrl: res.download_url || res.downloadUrl || 'https://cryptoworld.vip/download',
-            latestVersion: latest,
-            releaseNotes: res.release_notes || res.notes || res.message || 'CryptoWorld ka naya version release ho chuka hai! Behtar Binance data stream aur VIP features shamil hain.'
-          });
-          setUpdateModalOpen(true);
-        }
-      })
-      .catch((err) => {
-        console.warn('App version check fallback:', err);
-      });
-  }, [callBackend]);
 
   // -------------------------------------------------------------
   // ADMIN PANEL CONTROLLERS (FEATURE 2 - GOOGLE SHEET PREMIUMCODES & USERS SYNC)
@@ -1705,14 +1772,16 @@ export default function App() {
   };
 
   const handleSaveAdConfig = () => {
-    localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(adminAdSettings));
-    setAdConfig(adminAdSettings);
-    showToast('Settings Saved Successfully', 'success');
+    const sanitizedConfig = mergeAdConfig(DEFAULT_AD_CONFIG, adminAdSettings);
+    setAdminAdSettings(sanitizedConfig);
+    setAdConfig(sanitizedConfig);
+    localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(sanitizedConfig));
+    showToast('✅ AdMob App ID & Ad Unit IDs saved and active across the app!', 'success');
 
     // Background Google Sheet Sync (Applies globally across all worldwide users)
     const adminToken = localStorage.getItem('cw_admin_token') || '';
     callBackend('set_ad_config', {
-      config: adminAdSettings,
+      config: sanitizedConfig,
       adminToken
     }).catch(err => {
       console.warn('[AdConfig] Background sheet sync warning:', err);
@@ -1720,20 +1789,18 @@ export default function App() {
   };
 
   const handleResetAdConfig = () => {
-    if (confirm('Kya aap Ad Network ko default Google AdMob par reset karna chahte hain?')) {
-      setAdminAdSettings(DEFAULT_AD_CONFIG);
-      localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(DEFAULT_AD_CONFIG));
-      setAdConfig(DEFAULT_AD_CONFIG);
-      showToast('Settings Saved Successfully', 'info');
+    setAdminAdSettings(DEFAULT_AD_CONFIG);
+    localStorage.setItem(KEYS.AD_CONFIG, JSON.stringify(DEFAULT_AD_CONFIG));
+    setAdConfig(DEFAULT_AD_CONFIG);
+    showToast('🔄 AdMob IDs reset to official approved defaults!', 'info');
 
-      const adminToken = localStorage.getItem('cw_admin_token') || '';
-      callBackend('set_ad_config', {
-        config: DEFAULT_AD_CONFIG,
-        adminToken
-      }).catch(err => {
-        console.warn('[AdConfig] Background sheet reset warning:', err);
-      });
-    }
+    const adminToken = localStorage.getItem('cw_admin_token') || '';
+    callBackend('set_ad_config', {
+      config: DEFAULT_AD_CONFIG,
+      adminToken
+    }).catch(err => {
+      console.warn('[AdConfig] Background sheet reset warning:', err);
+    });
   };
 
   const filteredAdminCodes = useMemo(() => {
@@ -1757,6 +1824,34 @@ export default function App() {
   }, [adminUsers, adminUserSearch]);
 
   // -------------------------------------------------------------
+  // REAL GOOGLE ADMOB INTERSTITIAL AD (DYNAMIC UNIT ID)
+  // -------------------------------------------------------------
+  const handleShowInterstitialAd = async () => {
+    if (isInterstitialLoading) return;
+    const interstitialId = adConfig.interstitialAdUnitId || adConfig.appOpenAdUnitId || ADMOB_CONFIG.interstitialAdUnitId;
+
+    if (!Capacitor.isNativePlatform()) {
+      showToast(`⚠️ Interstitial Ad (${interstitialId}) sirf Android App mein chal sakta hai, Web par nahi.`, 'info');
+      return;
+    }
+
+    setIsInterstitialLoading(true);
+    try {
+      try {
+        await AdMob.prepareInterstitial({ adId: interstitialId });
+      } catch {
+        await AdMob.prepareInterstitial({ adId: interstitialId.replace('~', '/') });
+      }
+      await AdMob.showInterstitial();
+    } catch (err) {
+      console.warn('[AdMob] Interstitial Ad could not be shown:', err);
+      showToast('Interstitial Ad abhi available nahi hai. Dobara koshish karein.', 'error');
+    } finally {
+      setIsInterstitialLoading(false);
+    }
+  };
+
+  // -------------------------------------------------------------
   // REAL GOOGLE ADMOB REWARDED AD (NO TIMER - STRICT REWARD VERIFICATION)
   // -------------------------------------------------------------
   const handleWatchRewardedAd = async () => {
@@ -1778,15 +1873,16 @@ export default function App() {
     setIsAdLoading(true);
     showToast('Loading Google AdMob video...', 'info');
 
-    // Auto-retry helper: Retry once on failure before showing error
+    // Auto-retry helper: Retry once (and normalize ~ to / if needed) before showing error
     const prepareRewardAd = async (isRetry = false): Promise<boolean> => {
+      const candidateId = isRetry && adUnitId.includes('~') ? adUnitId.replace('~', '/') : adUnitId;
       try {
-        await AdMob.prepareRewardVideoAd({ adId: adUnitId });
+        await AdMob.prepareRewardVideoAd({ adId: candidateId });
         return true;
       } catch (err) {
         if (!isRetry) {
-          console.warn('[AdMob] First load attempt failed, retrying once...', err);
-          await new Promise(r => setTimeout(r, 1500));
+          console.warn('[AdMob] First load attempt failed, retrying with normalized Unit ID...', err);
+          await new Promise(r => setTimeout(r, 1200));
           return prepareRewardAd(true);
         }
         console.error('[AdMob] Rewarded Ad load failed after auto-retry:', err);
@@ -4428,7 +4524,7 @@ export default function App() {
                     style={{ fontSize: '0.85rem', padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}
                   >
                     <Sliders size={15} />
-                    <span>Rewarded Ads ({adminAdSettings.network.toUpperCase()})</span>
+                    <span>AdMob Settings ({adminAdSettings.network.toUpperCase()})</span>
                   </button>
                 </div>
 
@@ -4733,23 +4829,23 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Sub Tab 3: Rewarded Ads Config */}
+                {/* Sub Tab 3: AdMob Settings & Ad Network Configuration */}
                 {adminSubTab === 'ads' && (
                   <div className="material-card" style={{ padding: '20px' }}>
                     <div style={{ marginBottom: '18px' }}>
                       <h3 style={{ margin: '0 0 6px', fontSize: '1.1rem', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <Film size={20} color="var(--accent-cyan)" />
-                        <span>Rewarded Video Ad Network Monetization</span>
+                        <Sliders size={20} color="var(--accent-cyan)" />
+                        <span>AdMob Settings & Dynamic Ad Unit Configuration</span>
                       </h3>
                       <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                        Jab user ka daily quota khatam hota hai, to rewarded ad dekhne par +1 bonus signal milta hai. Niche se ad network switch karein.
+                        Yahan se official Google AdMob App ID, Rewarded Ad Unit ID, aur Interstitial Ad Unit ID dynamically update aur save karein. Yeh IDs bina code change kiye poori app aur Google Sheet mein sync hoti hain.
                       </p>
                     </div>
 
                     {/* Network Cards */}
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginBottom: '20px' }}>
                       {[
-                        { id: 'admob', name: 'Google AdMob (Official)', desc: 'Direct native Android AdMob Rewarded Video & App Open Ads', badge: 'Active / Tier 1' },
+                        { id: 'admob', name: 'Google AdMob (Official)', desc: 'Direct native Android AdMob Rewarded & Interstitial Ads', badge: 'Approved / Primary' },
                         { id: 'adsterra', name: 'Adsterra Direct Link', desc: 'Direct Link SmartURL for fallback monetization', badge: 'Backup' },
                         { id: 'monetag', name: 'Monetag Zone', desc: 'In-App rewarded interstitial & push zones', badge: 'Backup' },
                       ].map(net => {
@@ -4786,31 +4882,50 @@ export default function App() {
                       {adminAdSettings.network === 'admob' && (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                           <div style={{ background: 'rgba(0, 230, 118, 0.08)', border: '1px solid rgba(0, 230, 118, 0.25)', padding: '12px 14px', borderRadius: '8px', fontSize: '0.82rem', color: '#00e676' }}>
-                            <strong>✅ Google AdMob Active:</strong> Real Ads loaded directly through native Android SDK without simulated timers.
-                            <div style={{ marginTop: '6px', fontSize: '0.74rem', color: '#94a3b8' }}>
-                              App ID: <code>{ADMOB_CONFIG.appId}</code> (Configured in AndroidManifest.xml)
+                            <strong>✅ Official Approved Google AdMob Active:</strong> Dynamic IDs niche se manage karein.
+                            <div style={{ marginTop: '6px', fontSize: '0.74rem', color: '#94a3b8', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
+                              <span>Active App ID: <code>{adConfig.appId || ADMOB_CONFIG.appId}</code></span>
+                              <span>Rewarded ID: <code>{adConfig.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId}</code></span>
+                              <span>Interstitial ID: <code>{adConfig.interstitialAdUnitId || ADMOB_CONFIG.interstitialAdUnitId}</code></span>
                             </div>
                           </div>
 
                           <div className="form-group" style={{ marginBottom: 0 }}>
-                            <label className="form-label">Rewarded Video Ad Unit ID (Quota Unlock)</label>
+                            <label className="form-label">AdMob App ID</label>
                             <input
                               type="text"
                               className="form-input"
-                              placeholder="ca-app-pub-8825065858193656/9953437597"
+                              placeholder="ca-app-pub-8825065858193656~2430855580"
+                              value={adminAdSettings.appId || ''}
+                              onChange={e => setAdminAdSettings({ ...adminAdSettings, appId: e.target.value })}
+                            />
+                          </div>
+
+                          <div className="form-group" style={{ marginBottom: 0 }}>
+                            <label className="form-label">Rewarded Ad Unit ID (Quota Unlock +1 Signal)</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              placeholder="ca-app-pub-8825065858193656~2572882851"
                               value={adminAdSettings.rewardedAdUnitId || ''}
                               onChange={e => setAdminAdSettings({ ...adminAdSettings, rewardedAdUnitId: e.target.value })}
                             />
                           </div>
 
                           <div className="form-group" style={{ marginBottom: 0 }}>
-                            <label className="form-label">App Open Ad Unit ID (Startup Splash)</label>
+                            <label className="form-label">Interstitial Ad Unit ID (Full-Screen Interstitial)</label>
                             <input
                               type="text"
                               className="form-input"
-                              placeholder="ca-app-pub-8825065858193656/2956162280"
-                              value={adminAdSettings.appOpenAdUnitId || ''}
-                              onChange={e => setAdminAdSettings({ ...adminAdSettings, appOpenAdUnitId: e.target.value })}
+                              placeholder="ca-app-pub-8825065858193656~2381311165"
+                              value={adminAdSettings.interstitialAdUnitId || adminAdSettings.appOpenAdUnitId || ''}
+                              onChange={e =>
+                                setAdminAdSettings({
+                                  ...adminAdSettings,
+                                  interstitialAdUnitId: e.target.value,
+                                  appOpenAdUnitId: e.target.value
+                                })
+                              }
                             />
                           </div>
                         </div>
@@ -4849,7 +4964,7 @@ export default function App() {
                         onClick={handleSaveAdConfig}
                         style={{ padding: '10px 18px', fontSize: '0.85rem' }}
                       >
-                        💾 Save Ad Settings
+                        💾 Save AdMob Settings
                       </button>
                       <button
                         type="button"
@@ -4859,7 +4974,17 @@ export default function App() {
                         style={{ padding: '10px 18px', fontSize: '0.85rem' }}
                       >
                         <Play size={14} style={{ marginRight: '6px' }} />
-                        {isAdLoading ? 'Loading AdMob...' : 'Test Rewarded Ad'}
+                        {isAdLoading ? 'Loading Rewarded...' : 'Test Rewarded Ad'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        onClick={handleShowInterstitialAd}
+                        disabled={isInterstitialLoading}
+                        style={{ padding: '10px 18px', fontSize: '0.85rem' }}
+                      >
+                        <Film size={14} style={{ marginRight: '6px' }} />
+                        {isInterstitialLoading ? 'Loading Interstitial...' : 'Test Interstitial Ad'}
                       </button>
                       <button
                         type="button"
