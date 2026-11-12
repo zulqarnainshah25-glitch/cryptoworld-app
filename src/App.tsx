@@ -43,7 +43,7 @@ import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.8';
+const CURRENT_APP_VERSION = '1.0.9';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -62,7 +62,7 @@ export const ADMOB_CONFIG = {
   appId: 'ca-app-pub-8825065858193656~2430855580',
   rewardedAdUnitId: 'ca-app-pub-8825065858193656~2572882851',
   interstitialAdUnitId: 'ca-app-pub-8825065858193656~2381311165',
-  appOpenAdUnitId: 'ca-app-pub-8825065858193656~2381311165'
+  appOpenAdUnitId: 'ca-app-pub-8825065858193656/2956162280'
 };
 
 const LEGACY_RETIRED_ADMOB_IDS = new Set([
@@ -79,6 +79,15 @@ export const sanitizeAdMobId = (rawId: any, fallbackId: string): string => {
   if (!cleaned || LEGACY_RETIRED_ADMOB_IDS.has(cleaned)) return fallbackId;
   if (!/^ca-app-pub-\d{16}[~/]\d+$/.test(cleaned)) return fallbackId;
   return cleaned;
+};
+
+/**
+ * Converts any stored AdMob Ad Unit ID (whether using '~' or '/') into the strict
+ * 'ca-app-pub-XXXXXXXXXXXXXXXX/YYYYYYYYYY' slash format required by Google Mobile Ads Android SDK.
+ */
+export const toNativeAdUnitId = (rawId: any, fallbackId: string): string => {
+  const valid = sanitizeAdMobId(rawId, fallbackId);
+  return valid.replace('~', '/');
 };
 
 // Obfuscated internal vault resolver (never exposed in UI or plain-text source)
@@ -137,13 +146,19 @@ export const mergeAdConfig = (prev: typeof DEFAULT_AD_CONFIG, fetched: any): typ
     prev.interstitialAdUnitId ||
     prev.appOpenAdUnitId;
   const interstitialAdUnitId = sanitizeAdMobId(rawInterstitial, ADMOB_CONFIG.interstitialAdUnitId);
+  const rawAppOpen =
+    fetched.appOpenAdUnitId ||
+    fetched.interstitialAdUnitId ||
+    prev.appOpenAdUnitId ||
+    prev.interstitialAdUnitId;
+  const appOpenAdUnitId = sanitizeAdMobId(rawAppOpen, ADMOB_CONFIG.interstitialAdUnitId);
 
   return {
     network,
     appId,
     rewardedAdUnitId,
     interstitialAdUnitId,
-    appOpenAdUnitId: interstitialAdUnitId,
+    appOpenAdUnitId,
     adsterraDirectLink:
       fetched.adsterraDirectLink !== undefined
         ? String(fetched.adsterraDirectLink).trim()
@@ -153,6 +168,27 @@ export const mergeAdConfig = (prev: typeof DEFAULT_AD_CONFIG, fetched: any): typ
         ? String(fetched.monetagZoneId).trim()
         : (prev.monetagZoneId || '')
   };
+};
+
+export const buildOpeningAdCandidates = (config: typeof DEFAULT_AD_CONFIG) => {
+  const interstitialNativeId = toNativeAdUnitId(
+    config?.interstitialAdUnitId,
+    ADMOB_CONFIG.interstitialAdUnitId
+  );
+  const configuredAppOpenNativeId = toNativeAdUnitId(
+    config?.appOpenAdUnitId,
+    ADMOB_CONFIG.interstitialAdUnitId
+  );
+  const dedicatedAppOpenNativeId = ADMOB_CONFIG.appOpenAdUnitId.replace('~', '/');
+
+  const appOpenIds = Array.from(
+    new Set([configuredAppOpenNativeId, dedicatedAppOpenNativeId, interstitialNativeId].filter(Boolean))
+  );
+  const interstitialIds = Array.from(
+    new Set([interstitialNativeId, configuredAppOpenNativeId].filter(Boolean))
+  );
+
+  return { appOpenIds, interstitialIds };
 };
 
 const PLAN_LIMITS: Record<string, number> = {
@@ -461,7 +497,7 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [redeemCode, setRedeemCode] = useState('');
 
-  // Google AdMob Real Video & Interstitial Ads State
+  // Google AdMob Real Video, App Open & Interstitial Ads State
   const [isAdLoading, setIsAdLoading] = useState(false);
   const [isInterstitialLoading, setIsInterstitialLoading] = useState(false);
   const [adConfig, setAdConfig] = useState(() => {
@@ -474,6 +510,16 @@ export default function App() {
       return DEFAULT_AD_CONFIG;
     }
   });
+  const adConfigRef = useRef(adConfig);
+  useEffect(() => {
+    adConfigRef.current = adConfig;
+  }, [adConfig]);
+
+  // Single-flight locks & SDK warm-up trackers for reliable Android App Opening Ads
+  const admobInitPromiseRef = useRef<Promise<boolean> | null>(null);
+  const isOpeningAdBusyRef = useRef(false);
+  const lastOpeningAdShownAtRef = useRef(0);
+  const lastBackgroundedAtRef = useRef(0);
 
   const saveAdConfig = (newConfig: typeof DEFAULT_AD_CONFIG) => {
     const merged = mergeAdConfig(DEFAULT_AD_CONFIG, newConfig);
@@ -1323,6 +1369,120 @@ export default function App() {
   }, [callBackend]);
 
   // -------------------------------------------------------------
+  // RELIABLE ANDROID ADMOB INITIALIZATION & APP OPENING AD ENGINE
+  // (Fixes cold-start race condition, ~ vs / unit ID format, concurrent load collision, & no-fill retries)
+  // -------------------------------------------------------------
+  const ensureAdMobInitialized = useCallback(async (): Promise<boolean> => {
+    if (!Capacitor.isNativePlatform()) return false;
+    if (!admobInitPromiseRef.current) {
+      admobInitPromiseRef.current = (async () => {
+        try {
+          await AdMob.initialize({
+            initializeForTesting: false
+          });
+          // Allow native Google Play Services MobileAds.initialize callback to finish warming up adapters
+          await new Promise(resolve => setTimeout(resolve, 650));
+          console.log(
+            '[AdMob] Native SDK initialized & warmed up with App ID:',
+            adConfigRef.current.appId || ADMOB_CONFIG.appId
+          );
+          return true;
+        } catch (err) {
+          console.warn('[AdMob] SDK initialization warning:', err);
+          admobInitPromiseRef.current = null;
+          return false;
+        }
+      })();
+    }
+    return admobInitPromiseRef.current;
+  }, []);
+
+  const preloadNextAppOpenAd = useCallback(async () => {
+    if (!Capacitor.isNativePlatform() || isOpeningAdBusyRef.current) return;
+    try {
+      const ready = await ensureAdMobInitialized();
+      if (!ready) return;
+      const { appOpenIds } = buildOpeningAdCandidates(adConfigRef.current);
+      for (const unitId of appOpenIds) {
+        try {
+          const loadedCheck = await AdMob.isAppOpenLoaded({ adId: unitId });
+          if (loadedCheck?.value) return;
+          await AdMob.loadAppOpen({ adId: unitId });
+          return;
+        } catch {}
+      }
+    } catch {}
+  }, [ensureAdMobInitialized]);
+
+  const triggerAppOpeningAd = useCallback(
+    async (source: 'startup' | 'resume' | 'manual' = 'startup'): Promise<boolean> => {
+      if (!Capacitor.isNativePlatform()) return false;
+
+      // Single-flight guard: prevents AppOpenAdManager.kt from rejecting concurrent loads
+      if (isOpeningAdBusyRef.current) {
+        console.log(`[AdMob] Opening ad already in progress (skipped duplicate ${source} trigger)`);
+        return false;
+      }
+
+      // Cooldown check for automatic resume triggers (minimum 45s between opening ads)
+      const now = Date.now();
+      if (source === 'resume' && now - lastOpeningAdShownAtRef.current < 45000) {
+        return false;
+      }
+
+      isOpeningAdBusyRef.current = true;
+      try {
+        const sdkReady = await ensureAdMobInitialized();
+        if (!sdkReady) return false;
+
+        const { appOpenIds, interstitialIds } = buildOpeningAdCandidates(adConfigRef.current);
+        const retryDelays = source === 'startup' ? [0, 1600, 3200] : [0, 1500];
+
+        for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+          if (retryDelays[attempt] > 0) {
+            await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+          }
+
+          // Stage 1: Try showing already pre-cached App Open Ad or loading App Open Ad unit
+          for (const appOpenId of appOpenIds) {
+            try {
+              const check = await AdMob.isAppOpenLoaded({ adId: appOpenId }).catch(() => ({ value: false }));
+              if (!check?.value) {
+                await AdMob.loadAppOpen({ adId: appOpenId });
+              }
+              await AdMob.showAppOpen({ adId: appOpenId });
+              lastOpeningAdShownAtRef.current = Date.now();
+              console.log(`[AdMob] App Open Ad displayed successfully (${appOpenId}) on attempt #${attempt + 1}`);
+              setTimeout(() => preloadNextAppOpenAd(), 3500);
+              return true;
+            } catch {}
+          }
+
+          // Stage 2: Waterfall to Interstitial Ad unit (if opening unit is configured as Interstitial or App Open had no fill)
+          for (const interstitialId of interstitialIds) {
+            try {
+              await AdMob.prepareInterstitial({ adId: interstitialId });
+              await AdMob.showInterstitial({ adId: interstitialId });
+              lastOpeningAdShownAtRef.current = Date.now();
+              console.log(
+                `[AdMob] Opening Interstitial Ad displayed successfully (${interstitialId}) on attempt #${attempt + 1}`
+              );
+              setTimeout(() => preloadNextAppOpenAd(), 3500);
+              return true;
+            } catch {}
+          }
+        }
+
+        console.log(`[AdMob] Opening ad unavailable after ${retryDelays.length} attempts (${source})`);
+        return false;
+      } finally {
+        isOpeningAdBusyRef.current = false;
+      }
+    },
+    [ensureAdMobInitialized, preloadNextAppOpenAd]
+  );
+
+  // -------------------------------------------------------------
   // REAL SYNC INITIALIZATION SEQUENCE (FAST BOOT - NO STUCK)
   // -------------------------------------------------------------
   useEffect(() => {
@@ -1349,46 +1509,34 @@ export default function App() {
     fetchGlobalAdConfig();
     checkAppVersion();
 
-    // Re-sync Global Settings, App Version & Open Signals from Google Sheet when app returns from background to foreground
-    const handleAppForeground = () => {
-      if (document.visibilityState === 'visible') {
+    // Cold-start App Opening Ad on Native Android (runs once without re-triggering on state updates)
+    if (Capacitor.isNativePlatform()) {
+      triggerAppOpeningAd('startup');
+    }
+
+    // Re-sync Global Settings, App Version, Open Signals & Resume Opening Ad when app returns from background
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastBackgroundedAtRef.current = Date.now();
+      } else if (document.visibilityState === 'visible') {
         fetchGlobalAdConfig();
         fetchOpenSignalsFromSheet();
         checkAppVersion();
+        const awayMs = lastBackgroundedAtRef.current > 0 ? Date.now() - lastBackgroundedAtRef.current : 0;
+        if (Capacitor.isNativePlatform() && awayMs >= 15000) {
+          triggerAppOpeningAd('resume');
+        }
       }
     };
-    document.addEventListener('visibilitychange', handleAppForeground);
-    window.addEventListener('focus', handleAppForeground);
 
-    // Initialize Google AdMob & Non-blocking Interstitial Ad on Native Android
-    if (Capacitor.isNativePlatform()) {
-      (async () => {
-        try {
-          await AdMob.initialize({
-            initializeForTesting: false
-          });
-          console.log('[AdMob] Google Mobile Ads SDK initialized with App ID:', adConfig.appId || ADMOB_CONFIG.appId);
+    const handleWindowFocus = () => {
+      fetchGlobalAdConfig();
+      fetchOpenSignalsFromSheet();
+      checkAppVersion();
+    };
 
-          // Load & show Interstitial Ad asynchronously using dynamic Admin-configured Unit ID
-          const rawInterstitialId = adConfig.interstitialAdUnitId || adConfig.appOpenAdUnitId || ADMOB_CONFIG.interstitialAdUnitId;
-          try {
-            await AdMob.prepareInterstitial({ adId: rawInterstitialId });
-            await AdMob.showInterstitial();
-          } catch {
-            // Automatic fallback if native SDK requires slash separator for Ad Unit ID
-            const normalizedSlashId = rawInterstitialId.replace('~', '/');
-            try {
-              await AdMob.prepareInterstitial({ adId: normalizedSlashId });
-              await AdMob.showInterstitial();
-            } catch (interstitialErr) {
-              console.log('[AdMob] Startup Interstitial Ad skipped or unavailable:', interstitialErr);
-            }
-          }
-        } catch (adInitErr) {
-          console.warn('[AdMob] Initialization warning:', adInitErr);
-        }
-      })();
-    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
 
     const interval = setInterval(() => fetchMarketTickers(), 10000);
 
@@ -1396,10 +1544,10 @@ export default function App() {
       isMounted = false;
       clearTimeout(timer);
       clearInterval(interval);
-      document.removeEventListener('visibilitychange', handleAppForeground);
-      window.removeEventListener('focus', handleAppForeground);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, checkAppVersion, adConfig.appId, adConfig.interstitialAdUnitId, adConfig.appOpenAdUnitId]);
+  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, checkAppVersion, triggerAppOpeningAd]);
 
   // Sync with Google Sheet when user changes/logs in
   useEffect(() => {
@@ -1824,28 +1972,30 @@ export default function App() {
   }, [adminUsers, adminUserSearch]);
 
   // -------------------------------------------------------------
-  // REAL GOOGLE ADMOB INTERSTITIAL AD (DYNAMIC UNIT ID)
+  // REAL GOOGLE ADMOB APP OPENING / INTERSTITIAL AD (DYNAMIC UNIT ID)
   // -------------------------------------------------------------
   const handleShowInterstitialAd = async () => {
     if (isInterstitialLoading) return;
-    const interstitialId = adConfig.interstitialAdUnitId || adConfig.appOpenAdUnitId || ADMOB_CONFIG.interstitialAdUnitId;
+    const interstitialId = toNativeAdUnitId(
+      adConfig.interstitialAdUnitId || adConfig.appOpenAdUnitId,
+      ADMOB_CONFIG.interstitialAdUnitId
+    );
 
     if (!Capacitor.isNativePlatform()) {
-      showToast(`⚠️ Interstitial Ad (${interstitialId}) sirf Android App mein chal sakta hai, Web par nahi.`, 'info');
+      showToast(`⚠️ App Open / Interstitial Ad (${interstitialId}) sirf Android App mein chal sakta hai, Web par nahi.`, 'info');
       return;
     }
 
     setIsInterstitialLoading(true);
+    showToast('Loading Google AdMob Opening / Interstitial Ad...', 'info');
     try {
-      try {
-        await AdMob.prepareInterstitial({ adId: interstitialId });
-      } catch {
-        await AdMob.prepareInterstitial({ adId: interstitialId.replace('~', '/') });
+      const shown = await triggerAppOpeningAd('manual');
+      if (!shown) {
+        showToast('Opening / Interstitial Ad abhi available nahi hai. Internet check karke dobara koshish karein.', 'error');
       }
-      await AdMob.showInterstitial();
     } catch (err) {
-      console.warn('[AdMob] Interstitial Ad could not be shown:', err);
-      showToast('Interstitial Ad abhi available nahi hai. Dobara koshish karein.', 'error');
+      console.warn('[AdMob] Opening / Interstitial Ad could not be shown:', err);
+      showToast('Opening / Interstitial Ad abhi available nahi hai. Dobara koshish karein.', 'error');
     } finally {
       setIsInterstitialLoading(false);
     }
@@ -1861,7 +2011,7 @@ export default function App() {
     }
     if (isAdLoading) return;
 
-    const adUnitId = adConfig.rewardedAdUnitId || ADMOB_CONFIG.rewardedAdUnitId;
+    const adUnitId = toNativeAdUnitId(adConfig.rewardedAdUnitId, ADMOB_CONFIG.rewardedAdUnitId);
 
     // Web Browser Check (Real AdMob strictly runs on installed Android APK)
     if (!Capacitor.isNativePlatform()) {
@@ -1873,16 +2023,16 @@ export default function App() {
     setIsAdLoading(true);
     showToast('Loading Google AdMob video...', 'info');
 
-    // Auto-retry helper: Retry once (and normalize ~ to / if needed) before showing error
+    // Auto-retry helper: Ensures AdMob SDK is initialized and retries on transient network failure
     const prepareRewardAd = async (isRetry = false): Promise<boolean> => {
-      const candidateId = isRetry && adUnitId.includes('~') ? adUnitId.replace('~', '/') : adUnitId;
       try {
-        await AdMob.prepareRewardVideoAd({ adId: candidateId });
+        await ensureAdMobInitialized();
+        await AdMob.prepareRewardVideoAd({ adId: adUnitId });
         return true;
       } catch (err) {
         if (!isRetry) {
-          console.warn('[AdMob] First load attempt failed, retrying with normalized Unit ID...', err);
-          await new Promise(r => setTimeout(r, 1200));
+          console.warn('[AdMob] First Rewarded Ad load attempt failed, retrying...', err);
+          await new Promise(r => setTimeout(r, 1500));
           return prepareRewardAd(true);
         }
         console.error('[AdMob] Rewarded Ad load failed after auto-retry:', err);

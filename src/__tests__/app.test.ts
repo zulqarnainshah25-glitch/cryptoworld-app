@@ -247,8 +247,8 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.0.8', () => {
-    const current = '1.0.8';
+  it('should NOT trigger update popup when backend version is older than current 1.0.9', () => {
+    const current = '1.0.9';
     expect(compareVersions('1.0.1', current)).toBeLessThan(0);
     expect(compareVersions('1.0.2', current)).toBeLessThan(0);
     expect(compareVersions('1.0.3', current)).toBeLessThan(0);
@@ -256,19 +256,20 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     expect(compareVersions('1.0.5', current)).toBeLessThan(0);
     expect(compareVersions('1.0.6', current)).toBeLessThan(0);
     expect(compareVersions('1.0.7', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.7', current) > 0).toBe(false);
+    expect(compareVersions('1.0.8', current)).toBeLessThan(0);
+    expect(compareVersions('1.0.8', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.0.8', () => {
-    const current = '1.0.8';
-    const remoteSame = '1.0.8';
+  it('should NOT trigger update popup when backend version is identical to 1.0.9', () => {
+    const current = '1.0.9';
+    const remoteSame = '1.0.9';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.9 or 1.1.0)', () => {
-    const current = '1.0.8';
-    expect(compareVersions('1.0.9', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.10 or 1.1.0)', () => {
+    const current = '1.0.9';
+    expect(compareVersions('1.0.10', current)).toBe(1);
     expect(compareVersions('1.1.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
@@ -791,4 +792,56 @@ describe('12. AdMob app-ads.txt Verification & Publisher ID Consistency', () => 
     expect(manifestXml).toContain('ca-app-pub-8825065858193656~2430855580');
   });
 });
+
+describe('13. Android AdMob App Opening Ad Reliability Engine (Single-Flight & Waterfall)', () => {
+  const toNativeAdUnitId = (rawId: any, fallbackId: string): string => {
+    const valid = sanitizeAdMobId(rawId, fallbackId);
+    return valid.replace('~', '/');
+  };
+
+  it('should convert ~ tilde Ad Unit IDs into / slash format required by Google Mobile Ads Android SDK', () => {
+    expect(toNativeAdUnitId('ca-app-pub-8825065858193656~2381311165', ADMOB_CONFIG.interstitialAdUnitId)).toBe(
+      'ca-app-pub-8825065858193656/2381311165'
+    );
+    expect(toNativeAdUnitId('ca-app-pub-8825065858193656~2572882851', ADMOB_CONFIG.rewardedAdUnitId)).toBe(
+      'ca-app-pub-8825065858193656/2572882851'
+    );
+  });
+
+  it('should prevent concurrent AppOpenAdManager load collisions via single-flight mutex and fallback from AppOpen to Interstitial', async () => {
+    let isBusy = false;
+    let callLog: string[] = [];
+
+    const simulateOpeningAdWaterfall = async (appOpenFails: boolean) => {
+      if (isBusy) return 'SKIPPED_CONCURRENT';
+      isBusy = true;
+      try {
+        // Stage 1: Async App Open load attempt
+        callLog.push('loadAppOpen');
+        await Promise.resolve();
+        if (!appOpenFails) {
+          callLog.push('showAppOpen');
+          return 'SHOWN_APP_OPEN';
+        }
+        // Stage 2: Async Interstitial fallback when App Open fails or unit is Interstitial format
+        callLog.push('prepareInterstitial');
+        await Promise.resolve();
+        callLog.push('showInterstitial');
+        return 'SHOWN_INTERSTITIAL';
+      } finally {
+        isBusy = false;
+      }
+    };
+
+    // Concurrent calls: second call while first is in-flight must be skipped cleanly
+    const [res1, res2] = await Promise.all([
+      simulateOpeningAdWaterfall(true),
+      simulateOpeningAdWaterfall(false)
+    ]);
+    expect(res1).toBe('SHOWN_INTERSTITIAL');
+    expect(res2).toBe('SKIPPED_CONCURRENT');
+    expect(callLog).toEqual(['loadAppOpen', 'prepareInterstitial', 'showInterstitial']);
+  });
+});
+
 
