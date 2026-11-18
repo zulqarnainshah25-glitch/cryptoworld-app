@@ -55,11 +55,17 @@ import {
   isValidUsdtTradingPair
 } from './utils/pairsAndAlerts';
 import { sanitizeKlinesToOhlc, getSafeIncrementalBars } from './utils/chartHelpers';
+import {
+  formatCandlesForV7Backend,
+  normalizeWarningsList,
+  isStructureOverrideWarning,
+  parseV7SignalResponse
+} from './utils/signalPayload';
 
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.2.5';
+const CURRENT_APP_VERSION = '1.2.6';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -2568,39 +2574,17 @@ export default function App() {
       candles[candles.length - 1][4] = livePrice;
       setMarketPrices(prev => ({ ...prev, [selectedCoin]: livePrice }));
 
-      // Format last 100 candles with both OHLC object keys and array indices for V7 momentum analysis
-      const formatCandlesForBackend = (rawCandles: number[][], limit = 100) => {
-        return rawCandles.slice(-limit).map(k => ({
-          0: Number(k[0]),
-          1: Number(k[1]),
-          2: Number(k[2]),
-          3: Number(k[3]),
-          4: Number(k[4]),
-          5: Number(k[5]),
-          time: Number(k[0]),
-          open: Number(k[1]),
-          high: Number(k[2]),
-          low: Number(k[3]),
-          close: Number(k[4]),
-          volume: Number(k[5]),
-          o: Number(k[1]),
-          h: Number(k[2]),
-          l: Number(k[3]),
-          c: Number(k[4]),
-          v: Number(k[5])
-        }));
-      };
-
-      setScanStep('AI is analyzing market momentum...');
+      setScanStep('AI is analyzing market momentum & structure...');
       const ind1 = computeIndicators(candles, livePrice);
       const valid4h = candles4h.length >= 30 ? candles4h : candles;
       const valid1d = candles1d.length >= 30 ? candles1d : candles;
       const ind4h = computeIndicators(valid4h, livePrice);
       const ind1d = computeIndicators(valid1d, livePrice);
 
-      const recent100Candles = formatCandlesForBackend(candles, 100);
-      const recent100Candles4h = formatCandlesForBackend(valid4h, 100);
-      const recent100Candles1d = formatCandlesForBackend(valid1d, 100);
+      // Send 100 OHLCV candles (timestamp, open, high, low, close, volume) for Primary, 4H & 1D
+      const recent100Candles = formatCandlesForV7Backend(candles, 100);
+      const recent100Candles4h = formatCandlesForV7Backend(valid4h, 100);
+      const recent100Candles1d = formatCandlesForV7Backend(valid1d, 100);
 
       const payload = {
         action: 'signal',
@@ -2675,26 +2659,21 @@ export default function App() {
         candles1d: recent100Candles1d
       };
 
-      setScanStep('AI is analyzing market momentum...');
+      setScanStep('AI is analyzing market momentum & structure...');
       const res = await callBackend('signal', payload);
+      const parsedV7 = parseV7SignalResponse(res);
 
-      if (!res || res.error) {
-        const errMsg = res?.message || 'AI API se signal generate nahi ho saka. Dobara koshish karein.';
+      if (!parsedV7.ok) {
+        const errMsg = parsedV7.errorMessage || 'AI API se signal generate nahi ho saka. Dobara koshish karein.';
         setSignalError(errMsg);
         setCurrentSignal(null);
         showToast(errMsg, 'error');
         return;
       }
 
-      // Success response from V7 Momentum Focused backend (LONG, SHORT, or NO_TRADE when market is flat)
-      const rawDir = String(res.direction || 'NO_TRADE').toUpperCase().trim();
-      const direction: 'LONG' | 'SHORT' | 'NO_TRADE' =
-        rawDir === 'LONG' || rawDir === 'BUY' || rawDir === 'BULLISH'
-          ? 'LONG'
-          : rawDir === 'SHORT' || rawDir === 'SELL' || rawDir === 'BEARISH'
-            ? 'SHORT'
-            : 'NO_TRADE';
-      const isActionable = direction === 'LONG' || direction === 'SHORT';
+      // Success response from V7 Momentum + Market Structure backend (LONG, SHORT, or NO_TRADE)
+      const direction = parsedV7.direction;
+      const isActionable = parsedV7.isActionable;
       const livePriceNumber = Number(livePrice) || (selectedCoin === 'PEPEUSDT' ? 0.0000045 : 84500);
       const entryPrice = Number(res.entry) || Number(res.entryPrice) || livePriceNumber;
 
@@ -2721,7 +2700,7 @@ export default function App() {
         symbol: selectedCoin,
         timeframe: selectedTimeframe,
         direction,
-        signalDirection: isActionable ? direction : 'NEUTRAL',
+        signalDirection: direction === 'LONG' ? 'LONG' : direction === 'SHORT' ? 'SHORT' : 'NEUTRAL',
         entryStatus: isActionable ? 'READY' : 'NO_TRADE',
         currentPrice: livePriceNumber,
         entry: targetLevels.entry,
@@ -2743,7 +2722,7 @@ export default function App() {
         confidence: res.confidence || 75,
         directionConfidence: res.directionConfidence,
         entryConfidence: res.entryConfidence,
-        signalQuality: isActionable ? (res.signalQuality && res.signalQuality !== 'WAIT' ? res.signalQuality : 'STRONG') : 'N/A',
+        signalQuality: isActionable ? (res.signalQuality || 'STRONG') : 'N/A',
         signalQualityDetails: res.signalQualityDetails,
         signalQualityScore: res.signalQualityScore,
         model: res.model || 'V7-Momentum-AI',
@@ -2753,7 +2732,7 @@ export default function App() {
         userId: user.username,
         userDisplayName: user.username.toUpperCase(),
         reasoning: res.reasoning || (direction === 'NO_TRADE' ? 'Market flat hai, koi signal nahi mila.' : ''),
-        warnings: res.warnings || [],
+        warnings: parsedV7.warnings,
         sheetRow: Number(res.sheetRow || res.row || res.journalRow || 0)
       };
 
@@ -4002,7 +3981,7 @@ export default function App() {
                     {scanStep || 'AI is analyzing market momentum...'}
                   </div>
                   <div style={{ marginTop: '4px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                    Syncing 100 OHLC candles ({selectedTimeframe}) + HTF (4H & 1D) + Live Price for {selectedCoin}
+                    Syncing 100 OHLCV candles ({selectedTimeframe}) + HTF (4H & 1D) + Live Price for {selectedCoin}
                   </div>
                 </div>
               )}
@@ -4068,6 +4047,19 @@ export default function App() {
                       <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', margin: '0 0 12px', lineHeight: 1.5 }}>
                         {currentSignal.reasoning}
                       </p>
+                    )}
+                    {currentSignal.warnings && currentSignal.warnings.length > 0 && (
+                      <div style={{ background: 'rgba(255, 193, 7, 0.08)', border: '1px solid rgba(255, 193, 7, 0.35)', borderRadius: '8px', padding: '10px 12px', margin: '0 0 12px', textAlign: 'left' }}>
+                        <div style={{ color: '#ffcc00', fontWeight: 700, fontSize: '0.78rem', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <AlertTriangle size={14} />
+                          <span>Market Structure & Warnings</span>
+                        </div>
+                        <ul style={{ margin: 0, paddingLeft: '16px', color: '#fde68a', fontSize: '0.78rem', lineHeight: 1.5 }}>
+                          {normalizeWarningsList(currentSignal.warnings).map((w, idx) => (
+                            <li key={idx}>{w}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                       AI Engine: <strong style={{ color: 'var(--accent-cyan)' }}>{currentSignal.model}</strong>
@@ -4191,6 +4183,67 @@ export default function App() {
                           <span className={`tracker-target-tag ${cHits.t3Hit ? 'yellow' : ''}`}>
                             {cHits.t3Hit ? '✓ T3 HIT' : 'PENDING'}
                           </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Backend Warnings & [STRUCTURE OVERRIDE] Notice */}
+                  {(() => {
+                    const cleanWarnings = normalizeWarningsList(currentSignal.warnings);
+                    if (cleanWarnings.length === 0) return null;
+                    const hasOverride = cleanWarnings.some(isStructureOverrideWarning);
+                    return (
+                      <div
+                        style={{
+                          background: hasOverride ? 'rgba(255, 179, 0, 0.1)' : 'rgba(255, 204, 0, 0.06)',
+                          border: hasOverride ? '1px solid rgba(255, 179, 0, 0.55)' : '1px solid rgba(255, 204, 0, 0.3)',
+                          borderRadius: '8px',
+                          padding: '10px 12px',
+                          marginTop: '12px',
+                          fontSize: '0.82rem',
+                          lineHeight: 1.5
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+                          <span style={{ color: '#ffcc00', fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                            <AlertTriangle size={15} />
+                            <span>{hasOverride ? 'Structure Override & Signal Warnings' : 'Signal Warnings'}</span>
+                          </span>
+                          {hasOverride && (
+                            <span
+                              style={{
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                background: 'rgba(0, 210, 255, 0.16)',
+                                color: '#00e5ff',
+                                border: '1px solid rgba(0, 210, 255, 0.4)'
+                              }}
+                            >
+                              DIRECTION CORRECTED BY STRUCTURE
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          {cleanWarnings.map((warn, idx) => {
+                            const isOverride = isStructureOverrideWarning(warn);
+                            return (
+                              <div
+                                key={idx}
+                                style={{
+                                  color: isOverride ? '#fff3cd' : '#fde68a',
+                                  fontWeight: isOverride ? 600 : 400,
+                                  background: isOverride ? 'rgba(255, 179, 0, 0.14)' : 'transparent',
+                                  padding: isOverride ? '6px 8px' : '2px 0',
+                                  borderRadius: isOverride ? '6px' : undefined
+                                }}
+                              >
+                                {warn}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     );

@@ -8,6 +8,12 @@ import {
   isValidUsdtTradingPair
 } from '../utils/pairsAndAlerts';
 import { sanitizeKlinesToOhlc, getSafeIncrementalBars } from '../utils/chartHelpers';
+import {
+  formatCandlesForV7Backend,
+  normalizeWarningsList,
+  isStructureOverrideWarning,
+  parseV7SignalResponse
+} from '../utils/signalPayload';
 
 // -------------------------------------------------------------
 // CONSTANTS & LOGIC TESTED (Mirroring App core logic)
@@ -256,25 +262,25 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.2.5', () => {
-    const current = '1.2.5';
+  it('should NOT trigger update popup when backend version is older than current 1.2.6', () => {
+    const current = '1.2.6';
     expect(compareVersions('1.0.6', current)).toBeLessThan(0);
     expect(compareVersions('1.0.9', current)).toBeLessThan(0);
     expect(compareVersions('1.2.2', current)).toBeLessThan(0);
-    expect(compareVersions('1.2.4', current)).toBeLessThan(0);
-    expect(compareVersions('1.2.4', current) > 0).toBe(false);
+    expect(compareVersions('1.2.5', current)).toBeLessThan(0);
+    expect(compareVersions('1.2.5', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.2.5', () => {
-    const current = '1.2.5';
-    const remoteSame = '1.2.5';
+  it('should NOT trigger update popup when backend version is identical to 1.2.6', () => {
+    const current = '1.2.6';
+    const remoteSame = '1.2.6';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.2.6 or 1.3.0)', () => {
-    const current = '1.2.5';
-    expect(compareVersions('1.2.6', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.2.7 or 1.3.0)', () => {
+    const current = '1.2.6';
+    expect(compareVersions('1.2.7', current)).toBe(1);
     expect(compareVersions('1.3.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
@@ -935,15 +941,15 @@ describe('14. V7 Momentum Focused Backend Sync (No WAIT States, BUY/SELL Badges,
     }
   });
 
-  it('should confirm App.tsx CURRENT_APP_VERSION and build.gradle versionName are synced to 1.2.5', async () => {
+  it('should confirm App.tsx CURRENT_APP_VERSION and build.gradle versionName are synced to 1.2.6', async () => {
     const fs = await import('fs');
     const path = await import('path');
     const appCode = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
     const gradleCode = fs.readFileSync(path.resolve(process.cwd(), 'android/app/build.gradle'), 'utf-8');
 
-    expect(appCode).toContain("const CURRENT_APP_VERSION = '1.2.5'");
-    expect(gradleCode).toContain('versionName "1.2.5"');
-    expect(gradleCode).toContain('def vCode = 15');
+    expect(appCode).toContain("const CURRENT_APP_VERSION = '1.2.6'");
+    expect(gradleCode).toContain('versionName "1.2.6"');
+    expect(gradleCode).toContain('def vCode = 16');
     expect(appCode).not.toContain('WAIT_LONG');
     expect(appCode).not.toContain('WAIT_PULLBACK');
   });
@@ -1240,6 +1246,103 @@ describe('18. Vite 8 Dev Server Configuration & Preview Host Allowance', () => {
     expect(viteConfig).toContain('allowedHosts: true');
   });
 });
+
+describe('19. V7 Momentum + Market Structure Backend Sync (100 OHLCV Candles, HTF 4H/1D & Structure Override)', () => {
+  const buildMockKlines = (count: number) =>
+    Array.from({ length: count }, (_, idx) => [
+      1700000000000 + idx * 900000,
+      String(84000 + idx),
+      String(84150 + idx),
+      String(83950 + idx),
+      String(84100 + idx),
+      String(125.5 + idx)
+    ]);
+
+  it('should format exactly 100 OHLCV candle objects with timestamp, open, high, low, close, volume', () => {
+    const raw250 = buildMockKlines(250);
+    const formatted = formatCandlesForV7Backend(raw250, 100);
+
+    expect(formatted.length).toBe(100);
+    // Must keep the latest 100 candles (indices 150..249)
+    expect(formatted[0].timestamp).toBe(raw250[150][0]);
+    expect(formatted[99].timestamp).toBe(raw250[249][0]);
+
+    for (const c of formatted) {
+      expect(typeof c.timestamp).toBe('number');
+      expect(typeof c.open).toBe('number');
+      expect(typeof c.high).toBe('number');
+      expect(typeof c.low).toBe('number');
+      expect(typeof c.close).toBe('number');
+      expect(typeof c.volume).toBe('number');
+      expect(Array.isArray(c)).toBe(false);
+    }
+  });
+
+  it('should skip malformed/NaN kline entries gracefully and support 100-candle 4H and 1D HTF arrays', () => {
+    const rawWithBadRows: any[][] = [
+      ['bad', 'NaN', '0', '0', '0', '0'],
+      [1700000000000, '100', '105', '99', '104'], // missing volume
+      ...buildMockKlines(120)
+    ];
+    const htf4h = formatCandlesForV7Backend(rawWithBadRows, 100);
+    const htf1d = formatCandlesForV7Backend(buildMockKlines(150), 100);
+
+    expect(htf4h.length).toBe(100);
+    expect(htf1d.length).toBe(100);
+    expect(htf4h.every(c => Number.isFinite(c.volume) && c.timestamp > 0)).toBe(true);
+  });
+
+  it('should detect and sanitize [STRUCTURE OVERRIDE] warnings from backend responses', () => {
+    const rawWarnings = [
+      '[STRUCTURE OVERRIDE] Bullish Market Structure (HH+HL) detected; AI SHORT overridden to LONG.',
+      '  High 4H volume spike <script>alert(1)</script>  ',
+      '[STRUCTURE OVERRIDE] Bullish Market Structure (HH+HL) detected; AI SHORT overridden to LONG.',
+      null,
+      ''
+    ];
+    const cleaned = normalizeWarningsList(rawWarnings);
+    expect(cleaned.length).toBe(2);
+    expect(cleaned[1]).toBe('High 4H volume spike scriptalert(1)/script');
+    expect(isStructureOverrideWarning(cleaned[0])).toBe(true);
+    expect(isStructureOverrideWarning(cleaned[1])).toBe(false);
+  });
+
+  it('should parse V7 responses into BUY/SELL/NO_TRADE, surface Structure Override, and handle error: true', () => {
+    const overridden = parseV7SignalResponse({
+      direction: 'LONG',
+      warnings: ['[STRUCTURE OVERRIDE] Trend alignment override applied']
+    });
+    expect(overridden.ok).toBe(true);
+    expect(overridden.direction).toBe('LONG');
+    expect(overridden.badgeLabel).toBe('BUY');
+    expect(overridden.isActionable).toBe(true);
+    expect(overridden.hasStructureOverride).toBe(true);
+
+    const flat = parseV7SignalResponse({ direction: 'NO_TRADE', warnings: [] });
+    expect(flat.ok).toBe(true);
+    expect(flat.direction).toBe('NO_TRADE');
+    expect(flat.isActionable).toBe(false);
+    expect(flat.hasStructureOverride).toBe(false);
+
+    const failed = parseV7SignalResponse({ error: true, message: 'Groq & Gemini timeout' });
+    expect(failed.ok).toBe(false);
+    expect(failed.errorMessage).toBe('Groq & Gemini timeout');
+  });
+
+  it('should render [STRUCTURE OVERRIDE] warnings section inside App.tsx Signal Card without WAIT states', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const appCode = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
+
+    expect(appCode).toContain('formatCandlesForV7Backend(candles, 100)');
+    expect(appCode).toContain('formatCandlesForV7Backend(valid4h, 100)');
+    expect(appCode).toContain('formatCandlesForV7Backend(valid1d, 100)');
+    expect(appCode).toContain('isStructureOverrideWarning');
+    expect(appCode).toContain('DIRECTION CORRECTED BY STRUCTURE');
+    expect(appCode).toContain('Market Flat - No Trade');
+  });
+});
+
 
 
 
