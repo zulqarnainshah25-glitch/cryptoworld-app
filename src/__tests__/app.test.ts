@@ -256,25 +256,25 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.2.4', () => {
-    const current = '1.2.4';
+  it('should NOT trigger update popup when backend version is older than current 1.2.5', () => {
+    const current = '1.2.5';
     expect(compareVersions('1.0.6', current)).toBeLessThan(0);
     expect(compareVersions('1.0.9', current)).toBeLessThan(0);
     expect(compareVersions('1.2.2', current)).toBeLessThan(0);
-    expect(compareVersions('1.2.3', current)).toBeLessThan(0);
-    expect(compareVersions('1.2.3', current) > 0).toBe(false);
+    expect(compareVersions('1.2.4', current)).toBeLessThan(0);
+    expect(compareVersions('1.2.4', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.2.4', () => {
-    const current = '1.2.4';
-    const remoteSame = '1.2.4';
+  it('should NOT trigger update popup when backend version is identical to 1.2.5', () => {
+    const current = '1.2.5';
+    const remoteSame = '1.2.5';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.2.5 or 1.3.0)', () => {
-    const current = '1.2.4';
-    expect(compareVersions('1.2.5', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.2.6 or 1.3.0)', () => {
+    const current = '1.2.5';
+    expect(compareVersions('1.2.6', current)).toBe(1);
     expect(compareVersions('1.3.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
@@ -935,15 +935,15 @@ describe('14. V7 Momentum Focused Backend Sync (No WAIT States, BUY/SELL Badges,
     }
   });
 
-  it('should confirm App.tsx CURRENT_APP_VERSION and build.gradle versionName are synced to 1.2.4', async () => {
+  it('should confirm App.tsx CURRENT_APP_VERSION and build.gradle versionName are synced to 1.2.5', async () => {
     const fs = await import('fs');
     const path = await import('path');
     const appCode = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
     const gradleCode = fs.readFileSync(path.resolve(process.cwd(), 'android/app/build.gradle'), 'utf-8');
 
-    expect(appCode).toContain("const CURRENT_APP_VERSION = '1.2.4'");
-    expect(gradleCode).toContain('versionName "1.2.4"');
-    expect(gradleCode).toContain('def vCode = 14');
+    expect(appCode).toContain("const CURRENT_APP_VERSION = '1.2.5'");
+    expect(gradleCode).toContain('versionName "1.2.5"');
+    expect(gradleCode).toContain('def vCode = 15');
     expect(appCode).not.toContain('WAIT_LONG');
     expect(appCode).not.toContain('WAIT_PULLBACK');
   });
@@ -1225,6 +1225,22 @@ describe('17. Lightweight Charts Incremental Update Guard (Prevent "Cannot updat
     expect(cleaned[1].close).toBe(84550);
   });
 });
+
+describe('18. Vite 8 Dev Server Configuration & Preview Host Allowance', () => {
+  it('should use import.meta.dirname instead of __dirname for native configLoader and configure port 3000 + allowedHosts', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const viteConfig = fs.readFileSync(path.resolve(process.cwd(), 'vite.config.ts'), 'utf-8');
+
+    expect(viteConfig).not.toContain('__dirname');
+    expect(viteConfig).toContain('import.meta.dirname');
+    expect(viteConfig).toContain('port: 3000');
+    expect(viteConfig).toContain('strictPort: true');
+    expect(viteConfig).toContain("host: '0.0.0.0'");
+    expect(viteConfig).toContain('allowedHosts: true');
+  });
+});
+
 
 
 

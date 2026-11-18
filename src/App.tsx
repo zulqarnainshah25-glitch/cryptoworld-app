@@ -59,7 +59,7 @@ import { sanitizeKlinesToOhlc, getSafeIncrementalBars } from './utils/chartHelpe
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.2.4';
+const CURRENT_APP_VERSION = '1.2.5';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);

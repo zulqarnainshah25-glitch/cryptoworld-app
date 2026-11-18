@@ -314,23 +314,25 @@ Return ONLY valid JSON matching this exact structure:
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     build: {
       rollupOptions: {
         input: {
-          main: path.resolve(__dirname, 'index.html'),
-          about: path.resolve(__dirname, 'src/pages/about.html'),
-          terms: path.resolve(__dirname, 'src/pages/terms.html'),
-          disclaimer: path.resolve(__dirname, 'src/pages/disclaimer.html'),
-          contact: path.resolve(__dirname, 'src/pages/contact.html'),
+          main: path.resolve(import.meta.dirname, 'index.html'),
+          about: path.resolve(import.meta.dirname, 'src/pages/about.html'),
+          terms: path.resolve(import.meta.dirname, 'src/pages/terms.html'),
+          disclaimer: path.resolve(import.meta.dirname, 'src/pages/disclaimer.html'),
+          contact: path.resolve(import.meta.dirname, 'src/pages/contact.html'),
         },
       },
     },
     server: {
       port: 3000,
+      strictPort: true,
       host: '0.0.0.0',
+      allowedHosts: true,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
