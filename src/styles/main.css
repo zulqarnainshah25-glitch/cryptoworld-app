@@ -667,14 +667,16 @@ select.app-select:focus {
   text-transform: uppercase;
 }
 
-.signal-badge-direction.LONG {
+.signal-badge-direction.LONG,
+.signal-badge-direction.long {
   background: rgba(0, 255, 136, 0.18);
   color: var(--accent-green);
   border: 1px solid var(--accent-green);
   box-shadow: var(--shadow-glow-green);
 }
 
-.signal-badge-direction.SHORT {
+.signal-badge-direction.SHORT,
+.signal-badge-direction.short {
   background: rgba(255, 77, 77, 0.18);
   color: var(--accent-red);
   border: 1px solid var(--accent-red);
@@ -682,9 +684,8 @@ select.app-select:focus {
 }
 
 .signal-badge-direction.NO_TRADE,
-.signal-badge-direction.NEUTRAL,
-.signal-badge-direction.WAIT_LONG,
-.signal-badge-direction.WAIT_SHORT {
+.signal-badge-direction.no_trade,
+.signal-badge-direction.NEUTRAL {
   background: rgba(255, 204, 0, 0.15);
   color: var(--accent-yellow);
   border: 1px solid var(--accent-yellow);

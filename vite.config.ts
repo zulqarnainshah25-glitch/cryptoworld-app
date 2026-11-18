@@ -11,6 +11,7 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: false,
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg', 'icon-192.png', 'icon-512.png'],
         manifest: {
           id: '/',
@@ -50,7 +51,7 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),
@@ -210,6 +211,46 @@ Return ONLY valid JSON matching this exact structure:
 
               res.statusCode = 502;
               res.end(JSON.stringify({ error: 'Failed to fetch Binance ticker' }));
+            } catch (err: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          });
+
+          // Binance Exchange Info Proxy (Auto-detect newly launched USDT pairs)
+          server.middlewares.use('/api/binance-exchange-info', async (_req, res) => {
+            try {
+              const infoUrls = [
+                'https://fapi.binance.com/fapi/v1/exchangeInfo',
+                'https://data-api.binance.vision/api/v3/exchangeInfo',
+                'https://api.binance.com/api/v3/exchangeInfo'
+              ];
+              for (const u of infoUrls) {
+                try {
+                  const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+                  if (r.ok) {
+                    const json: any = await r.json();
+                    const compact = Array.isArray(json?.symbols)
+                      ? json.symbols
+                          .filter((s: any) => s && s.quoteAsset === 'USDT' && s.status === 'TRADING')
+                          .map((s: any) => ({
+                            symbol: s.symbol,
+                            baseAsset: s.baseAsset,
+                            quoteAsset: s.quoteAsset,
+                            status: s.status,
+                            contractType: s.contractType,
+                            onboardDate: s.onboardDate
+                          }))
+                      : [];
+                    res.setHeader('Content-Type', 'application/json');
+                    res.setHeader('Cache-Control', 'public, max-age=120');
+                    res.end(JSON.stringify({ symbols: compact }));
+                    return;
+                  }
+                } catch {}
+              }
+              res.statusCode = 502;
+              res.end(JSON.stringify({ error: 'Failed to fetch Binance exchangeInfo' }));
             } catch (err: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: err.message }));

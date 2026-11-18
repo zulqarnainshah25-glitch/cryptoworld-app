@@ -1,4 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { isSafeSwResponse, manageServiceWorkerLifecycle } from '../utils/serviceWorker';
+import {
+  BASE_SUPPORTED_COINS,
+  createPriceAlert,
+  evaluatePriceAlerts,
+  discoverNewLaunchedPairs,
+  isValidUsdtTradingPair
+} from '../utils/pairsAndAlerts';
+import { sanitizeKlinesToOhlc, getSafeIncrementalBars } from '../utils/chartHelpers';
 
 // -------------------------------------------------------------
 // CONSTANTS & LOGIC TESTED (Mirroring App core logic)
@@ -247,30 +256,26 @@ describe('5. Semantic Version Comparison & Update Modal Rules', () => {
     return 0;
   };
 
-  it('should NOT trigger update popup when backend version is older than current 1.0.9', () => {
-    const current = '1.0.9';
-    expect(compareVersions('1.0.1', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.2', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.3', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.4', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.5', current)).toBeLessThan(0);
+  it('should NOT trigger update popup when backend version is older than current 1.2.4', () => {
+    const current = '1.2.4';
     expect(compareVersions('1.0.6', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.7', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.8', current)).toBeLessThan(0);
-    expect(compareVersions('1.0.8', current) > 0).toBe(false);
+    expect(compareVersions('1.0.9', current)).toBeLessThan(0);
+    expect(compareVersions('1.2.2', current)).toBeLessThan(0);
+    expect(compareVersions('1.2.3', current)).toBeLessThan(0);
+    expect(compareVersions('1.2.3', current) > 0).toBe(false);
   });
 
-  it('should NOT trigger update popup when backend version is identical to 1.0.9', () => {
-    const current = '1.0.9';
-    const remoteSame = '1.0.9';
+  it('should NOT trigger update popup when backend version is identical to 1.2.4', () => {
+    const current = '1.2.4';
+    const remoteSame = '1.2.4';
     expect(compareVersions(remoteSame, current)).toBe(0);
     expect(compareVersions(remoteSame, current) > 0).toBe(false);
   });
 
-  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.0.10 or 1.1.0)', () => {
-    const current = '1.0.9';
-    expect(compareVersions('1.0.10', current)).toBe(1);
-    expect(compareVersions('1.1.0', current)).toBe(1);
+  it('should trigger update popup ONLY when backend version is strictly newer (e.g. 1.2.5 or 1.3.0)', () => {
+    const current = '1.2.4';
+    expect(compareVersions('1.2.5', current)).toBe(1);
+    expect(compareVersions('1.3.0', current)).toBe(1);
     expect(compareVersions('2.0.0', current)).toBe(1);
   });
 });
@@ -464,8 +469,8 @@ describe('7. Google Sheet Open Trades Evaluation (Live Price + Candle High/Low)'
   });
 });
 
-describe('8. Multi-Timeframe Signal Payload & 50-Candle OHLC Formatter', () => {
-  const formatCandlesForBackend = (candles: number[][], limit = 50) => {
+describe('8. Multi-Timeframe Signal Payload & 100-Candle OHLC Formatter', () => {
+  const formatCandlesForBackend = (candles: number[][], limit = 100) => {
     if (!Array.isArray(candles)) return [];
     return candles.slice(-limit).map(k => ({
       0: Number(k[0]),
@@ -488,7 +493,7 @@ describe('8. Multi-Timeframe Signal Payload & 50-Candle OHLC Formatter', () => {
     }));
   };
 
-  it('should slice exactly the last 50 candles when given 250 candles', () => {
+  it('should slice exactly the last 100 candles when given 250 candles', () => {
     const raw250 = Array.from({ length: 250 }, (_, i) => [
       1700000000000 + i * 60000,
       80000 + i,
@@ -497,8 +502,9 @@ describe('8. Multi-Timeframe Signal Payload & 50-Candle OHLC Formatter', () => {
       80050 + i,
       100 + i
     ]);
-    const formatted = formatCandlesForBackend(raw250, 50);
-    expect(formatted.length).toBe(50);
+    const formatted = formatCandlesForBackend(raw250, 100);
+    expect(formatted.length).toBe(100);
+    expect(formatted[0].open).toBe(80000 + 150);
     const last = formatted[formatted.length - 1];
     expect(last.close).toBe(80050 + 249);
     expect(last[4]).toBe(80050 + 249);
@@ -510,20 +516,27 @@ describe('8. Multi-Timeframe Signal Payload & 50-Candle OHLC Formatter', () => {
     expect(last[3]).toBe(79900 + 249);
   });
 
-  it('should include recentCandles, candles4h, candles1d, and updated currentPrice in payload', () => {
-    const sampleKline = [[1700000000000, 81000, 81500, 80800, 81200, 500]];
+  it('should include 100-candle recentCandles, candles4h, candles1d, and updated currentPrice in payload', () => {
+    const raw120 = Array.from({ length: 120 }, (_, i) => [
+      1700000000000 + i * 60000,
+      81000 + i,
+      81500 + i,
+      80800 + i,
+      81200 + i,
+      500 + i
+    ]);
     const payload = {
       symbol: 'BTCUSDT',
       timeframe: '1h',
       currentPrice: 81255.5,
-      recentCandles: formatCandlesForBackend(sampleKline, 50),
-      candles4h: formatCandlesForBackend(sampleKline, 50),
-      candles1d: formatCandlesForBackend(sampleKline, 50)
+      recentCandles: formatCandlesForBackend(raw120, 100),
+      candles4h: formatCandlesForBackend(raw120, 100),
+      candles1d: formatCandlesForBackend(raw120, 100)
     };
     expect(payload.currentPrice).toBe(81255.5);
-    expect(payload.recentCandles.length).toBe(1);
-    expect(payload.candles4h.length).toBe(1);
-    expect(payload.candles1d.length).toBe(1);
+    expect(payload.recentCandles.length).toBe(100);
+    expect(payload.candles4h.length).toBe(100);
+    expect(payload.candles1d.length).toBe(100);
   });
 });
 
@@ -843,5 +856,375 @@ describe('13. Android AdMob App Opening Ad Reliability Engine (Single-Flight & W
     expect(callLog).toEqual(['loadAppOpen', 'prepareInterstitial', 'showInterstitial']);
   });
 });
+
+describe('14. V7 Momentum Focused Backend Sync (No WAIT States, BUY/SELL Badges, Error & NO_TRADE UI)', () => {
+  const parseV7BackendResponse = (res: any) => {
+    if (!res || res.error) {
+      return {
+        ok: false as const,
+        errorMessage: res?.message || 'AI API se signal generate nahi ho saka. Dobara koshish karein.'
+      };
+    }
+
+    const rawDir = String(res.direction || 'NO_TRADE').toUpperCase().trim();
+    const direction: 'LONG' | 'SHORT' | 'NO_TRADE' =
+      rawDir === 'LONG' || rawDir === 'BUY' || rawDir === 'BULLISH'
+        ? 'LONG'
+        : rawDir === 'SHORT' || rawDir === 'SELL' || rawDir === 'BEARISH'
+          ? 'SHORT'
+          : 'NO_TRADE';
+
+    const isActionable = direction === 'LONG' || direction === 'SHORT';
+    const badgeLabel = direction === 'LONG' ? 'BUY' : direction === 'SHORT' ? 'SELL' : 'Market Flat - No Trade';
+    const message =
+      direction === 'NO_TRADE'
+        ? 'Market flat hai, koi signal nahi mila'
+        : `${badgeLabel} signal ready`;
+
+    return {
+      ok: true as const,
+      direction,
+      isActionable,
+      badgeLabel,
+      message,
+      shouldSaveToJournal: isActionable
+    };
+  };
+
+  it('should normalize LONG/SHORT strictly and map any legacy WAIT_* or null direction to NO_TRADE', () => {
+    expect(parseV7BackendResponse({ direction: 'LONG', entry: 84000 })).toMatchObject({
+      ok: true,
+      direction: 'LONG',
+      isActionable: true,
+      badgeLabel: 'BUY',
+      shouldSaveToJournal: true
+    });
+
+    expect(parseV7BackendResponse({ direction: 'SHORT', entry: 84000 })).toMatchObject({
+      ok: true,
+      direction: 'SHORT',
+      isActionable: true,
+      badgeLabel: 'SELL',
+      shouldSaveToJournal: true
+    });
+
+    // Legacy WAIT gates or flat responses must never render WAIT badges
+    for (const legacyDir of ['WAIT_LONG', 'WAIT_SHORT', 'WAIT_PULLBACK', 'WAIT_COUNTER_TREND', 'WAIT_BETTER_RR', 'NO_TRADE', '', null]) {
+      expect(parseV7BackendResponse({ direction: legacyDir })).toMatchObject({
+        ok: true,
+        direction: 'NO_TRADE',
+        isActionable: false,
+        badgeLabel: 'Market Flat - No Trade',
+        message: 'Market flat hai, koi signal nahi mila',
+        shouldSaveToJournal: false
+      });
+    }
+  });
+
+  it('should surface clear error messages when backend returns error: true or null (AI API failure)', () => {
+    const apiFail = parseV7BackendResponse({ error: true, message: 'Groq AI rate limit exceeded' });
+    expect(apiFail.ok).toBe(false);
+    if (!apiFail.ok) {
+      expect(apiFail.errorMessage).toBe('Groq AI rate limit exceeded');
+    }
+
+    const nullFail = parseV7BackendResponse(null);
+    expect(nullFail.ok).toBe(false);
+    if (!nullFail.ok) {
+      expect(nullFail.errorMessage).toContain('AI API');
+    }
+  });
+
+  it('should confirm App.tsx CURRENT_APP_VERSION and build.gradle versionName are synced to 1.2.4', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const appCode = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
+    const gradleCode = fs.readFileSync(path.resolve(process.cwd(), 'android/app/build.gradle'), 'utf-8');
+
+    expect(appCode).toContain("const CURRENT_APP_VERSION = '1.2.4'");
+    expect(gradleCode).toContain('versionName "1.2.4"');
+    expect(gradleCode).toContain('def vCode = 14');
+    expect(appCode).not.toContain('WAIT_LONG');
+    expect(appCode).not.toContain('WAIT_PULLBACK');
+  });
+});
+
+describe('15. Redirect-Safe Service Worker Lifecycle & Dev Preview Guard', () => {
+  it('should reject opaqueredirect, 3xx redirects, and non-OK responses before registering SW', () => {
+    expect(isSafeSwResponse({ ok: false, status: 0, type: 'opaqueredirect' })).toBe(false);
+    expect(isSafeSwResponse({ ok: false, status: 302, type: 'basic' })).toBe(false);
+    expect(isSafeSwResponse({ ok: false, status: 404, type: 'basic' })).toBe(false);
+    expect(isSafeSwResponse(null)).toBe(false);
+    expect(isSafeSwResponse({ ok: true, status: 200, type: 'basic' })).toBe(true);
+  });
+
+  it('should purge stale dev-sw.js registrations in dev mode without calling register()', async () => {
+    let registerCalled = false;
+    let unregisteredDevSw = false;
+    let keptOtherSw = false;
+
+    const status = await manageServiceWorkerLifecycle({
+      isProd: false,
+      isNative: false,
+      nav: {
+        serviceWorker: {
+          register: async () => {
+            registerCalled = true;
+          },
+          getRegistrations: async () => [
+            {
+              active: { scriptURL: 'https://ais-dev.run.app/dev-sw.js?dev-sw' },
+              unregister: async () => {
+                unregisteredDevSw = true;
+                return true;
+              },
+            },
+            {
+              active: { scriptURL: 'https://example.com/other.js' },
+              unregister: async () => {
+                keptOtherSw = true;
+                return true;
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(status).toBe('CLEANED_DEV');
+    expect(registerCalled).toBe(false);
+    expect(unregisteredDevSw).toBe(true);
+    expect(keptOtherSw).toBe(false);
+  });
+
+  it('should skip SW registration in production when /sw.js is behind an auth redirect', async () => {
+    let registerCalled = false;
+
+    const status = await manageServiceWorkerLifecycle({
+      isProd: true,
+      isNative: false,
+      nav: {
+        serviceWorker: {
+          register: async () => {
+            registerCalled = true;
+          },
+        },
+      },
+      fetcher: async () => ({ ok: false, status: 0, type: 'opaqueredirect' }),
+    });
+
+    expect(status).toBe('SKIPPED_REDIRECT');
+    expect(registerCalled).toBe(false);
+  });
+
+  it('should register /sw.js in production when preflight returns 200 OK without redirect', async () => {
+    let registeredPath = '';
+
+    const status = await manageServiceWorkerLifecycle({
+      isProd: true,
+      isNative: false,
+      nav: {
+        serviceWorker: {
+          register: async (scriptURL: string) => {
+            registeredPath = scriptURL;
+          },
+        },
+      },
+      fetcher: async () => ({ ok: true, status: 200, type: 'basic' }),
+    });
+
+    expect(status).toBe('REGISTERED');
+    expect(registeredPath).toBe('/sw.js');
+  });
+
+  it('should skip SW registration completely on Capacitor native platforms', async () => {
+    let registerCalled = false;
+
+    const status = await manageServiceWorkerLifecycle({
+      isProd: true,
+      isNative: true,
+      nav: {
+        serviceWorker: {
+          register: async () => {
+            registerCalled = true;
+          },
+        },
+      },
+    });
+
+    expect(status).toBe('SKIPPED_NATIVE');
+    expect(registerCalled).toBe(false);
+  });
+
+  it('should disable VitePWA dev-sw.js auto-injection in vite.config.ts', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const viteConfig = fs.readFileSync(path.resolve(process.cwd(), 'vite.config.ts'), 'utf-8');
+
+    expect(viteConfig).toContain('injectRegister: false');
+    expect(viteConfig).toMatch(/devOptions:\s*\{\s*enabled:\s*false/);
+  });
+});
+
+describe('16. Price Alerts, 35+ Supported Pairs & Auto Newly Launched Pair Discovery', () => {
+  it('should include at least 35 unique valid USDT pairs (original 15 + 20 new pairs)', () => {
+    expect(BASE_SUPPORTED_COINS.length).toBeGreaterThanOrEqual(35);
+    const symbols = BASE_SUPPORTED_COINS.map(c => c.symbol);
+    expect(new Set(symbols).size).toBe(symbols.length);
+    expect(symbols).toContain('ARBUSDT');
+    expect(symbols).toContain('WIFUSDT');
+    expect(symbols).toContain('JUPUSDT');
+    expect(symbols).toContain('TONUSDT');
+    expect(symbols).toContain('INJUSDT');
+    expect(symbols.every(s => isValidUsdtTradingPair(s))).toBe(true);
+  });
+
+  it('should create valid price alerts with AUTO condition detection and reject invalid inputs', () => {
+    const aboveRes = createPriceAlert({
+      symbol: 'btcusdt',
+      targetPrice: 90000,
+      currentPrice: 85000,
+      conditionMode: 'AUTO',
+      note: 'Breakout <script>'
+    });
+    expect(aboveRes.ok).toBe(true);
+    if (aboveRes.ok) {
+      expect(aboveRes.alert.symbol).toBe('BTCUSDT');
+      expect(aboveRes.alert.condition).toBe('ABOVE');
+      expect(aboveRes.alert.note).toBe('Breakout script');
+      expect(aboveRes.alert.triggered).toBe(false);
+    }
+
+    const belowRes = createPriceAlert({
+      symbol: 'SOLUSDT',
+      targetPrice: 95,
+      currentPrice: 105,
+      conditionMode: 'AUTO'
+    });
+    expect(belowRes.ok).toBe(true);
+    if (belowRes.ok) {
+      expect(belowRes.alert.condition).toBe('BELOW');
+    }
+
+    expect(createPriceAlert({ symbol: 'BTCUSDT', targetPrice: 0, currentPrice: 85000 }).ok).toBe(false);
+    expect(createPriceAlert({ symbol: 'BTCUSDT', targetPrice: -10, currentPrice: 85000 }).ok).toBe(false);
+    expect(createPriceAlert({ symbol: 'BTCUSDT', targetPrice: Number.NaN, currentPrice: 85000 }).ok).toBe(false);
+    expect(createPriceAlert({ symbol: '', targetPrice: 100, currentPrice: 90 }).ok).toBe(false);
+  });
+
+  it('should trigger ABOVE and BELOW alerts accurately on live price ticks and never double-trigger', () => {
+    const a1 = createPriceAlert({ symbol: 'BTCUSDT', targetPrice: 90000, currentPrice: 85000, conditionMode: 'ABOVE', now: 1000 });
+    const a2 = createPriceAlert({ symbol: 'ETHUSDT', targetPrice: 2200, currentPrice: 2400, conditionMode: 'BELOW', now: 1000 });
+    const a3 = createPriceAlert({ symbol: 'SOLUSDT', targetPrice: 150, currentPrice: 110, conditionMode: 'ABOVE', now: 1000 });
+    if (!a1.ok || !a2.ok || !a3.ok) throw new Error('Setup failed');
+
+    const alerts = [a1.alert, a2.alert, a3.alert];
+
+    // Tick 1: BTC hits 90500 (ABOVE hit), ETH hits 2190 (BELOW hit), SOL at 120 (not hit)
+    const tick1 = evaluatePriceAlerts(alerts, { BTCUSDT: 90500, ETHUSDT: 2190, SOLUSDT: 120 }, 5000);
+    expect(tick1.newlyTriggered.length).toBe(2);
+    expect(tick1.newlyTriggered.map(a => a.symbol)).toEqual(['BTCUSDT', 'ETHUSDT']);
+    expect(tick1.updatedAlerts[0].triggered).toBe(true);
+    expect(tick1.updatedAlerts[0].triggeredPrice).toBe(90500);
+    expect(tick1.updatedAlerts[1].triggered).toBe(true);
+    expect(tick1.updatedAlerts[2].triggered).toBe(false);
+
+    // Tick 2: Same prices again — already-triggered alerts must NOT fire twice
+    const tick2 = evaluatePriceAlerts(tick1.updatedAlerts, { BTCUSDT: 91000, ETHUSDT: 2100, SOLUSDT: 125 }, 6000);
+    expect(tick2.newlyTriggered.length).toBe(0);
+  });
+
+  it('should auto-discover newly launched USDT pairs, filter unsafe/invalid pairs, and enforce cap', () => {
+    const now = 1_763_400_000_000;
+    const tenDaysAgo = now - 10 * 24 * 60 * 60 * 1000;
+    const twoYearsAgo = now - 730 * 24 * 60 * 60 * 1000;
+
+    const exchangeSymbols = [
+      { symbol: 'BTCUSDT', baseAsset: 'BTC', quoteAsset: 'USDT', status: 'TRADING', contractType: 'PERPETUAL', onboardDate: twoYearsAgo },
+      { symbol: 'HYPERNEWUSDT', baseAsset: 'HYPERNEW', quoteAsset: 'USDT', status: 'TRADING', contractType: 'PERPETUAL', onboardDate: tenDaysAgo },
+      { symbol: 'KAITOUSDT', baseAsset: 'KAITO', quoteAsset: 'USDT', status: 'TRADING', contractType: 'PERPETUAL', onboardDate: now - 2 * 86400000 },
+      { symbol: 'BTCUSDT_260626', baseAsset: 'BTC', quoteAsset: 'USDT', status: 'TRADING', contractType: 'CURRENT_QUARTER', onboardDate: tenDaysAgo },
+      { symbol: 'BTCUPUSDT', baseAsset: 'BTCUP', quoteAsset: 'USDT', status: 'TRADING', onboardDate: tenDaysAgo },
+      { symbol: 'OLDCOINUSDT', baseAsset: 'OLDCOIN', quoteAsset: 'USDT', status: 'TRADING', contractType: 'PERPETUAL', onboardDate: twoYearsAgo },
+      { symbol: 'DELISTEDUSDT', baseAsset: 'DELISTED', quoteAsset: 'USDT', status: 'BREAK', contractType: 'PERPETUAL', onboardDate: tenDaysAgo }
+    ];
+
+    const res = discoverNewLaunchedPairs(
+      BASE_SUPPORTED_COINS,
+      exchangeSymbols,
+      { HYPERNEWUSDT: 1.45, KAITOUSDT: 2.1 },
+      { now, recentWindowDays: 90, maxAutoPairs: 50 }
+    );
+
+    expect(res.newlyAddedCoins.map(c => c.symbol)).toEqual(['KAITOUSDT', 'HYPERNEWUSDT']);
+    expect(res.newlyAddedCoins.every(c => c.isNewLaunch === true)).toBe(true);
+    expect(res.mergedCoins.length).toBe(BASE_SUPPORTED_COINS.length + 2);
+  });
+});
+
+describe('17. Lightweight Charts Incremental Update Guard (Prevent "Cannot update oldest data")', () => {
+  const sampleBars = [
+    { time: 1700000000, open: 84000, high: 84200, low: 83900, close: 84100 },
+    { time: 1700003600, open: 84100, high: 84500, low: 84000, close: 84400 },
+    { time: 1700007200, open: 84400, high: 84600, low: 84300, close: 84550 }
+  ];
+
+  it('should NEVER emit an older bar (secondLast < currentLastTime) during same-candle polling', () => {
+    // Reproduces the exact crash: series currently ends at 1700007200, poll returns same bars
+    const plan = getSafeIncrementalBars(sampleBars, 1700007200);
+    expect(plan.needsFullReset).toBe(false);
+    expect(plan.barsToUpdate.length).toBe(1);
+    expect(plan.barsToUpdate[0].time).toBe(1700007200);
+    expect(plan.barsToUpdate.every(b => b.time >= 1700007200)).toBe(true);
+  });
+
+  it('should emit both finalizing bar and newly opened candle cleanly on candle rollover', () => {
+    const rolledBars = [
+      ...sampleBars,
+      { time: 1700010800, open: 84550, high: 84700, low: 84500, close: 84650 }
+    ];
+    // Series still ended at 1700007200 before this poll
+    const plan = getSafeIncrementalBars(rolledBars, 1700007200);
+    expect(plan.needsFullReset).toBe(false);
+    expect(plan.barsToUpdate.map(b => b.time)).toEqual([1700007200, 1700010800]);
+    expect(plan.nextLastTime).toBe(1700010800);
+  });
+
+  it('should ignore stale upstream fallback data older than currentLastTime without crashing', () => {
+    const staleBars = sampleBars.slice(0, 2); // ends at 1700003600 < 1700007200
+    const plan = getSafeIncrementalBars(staleBars, 1700007200);
+    expect(plan.needsFullReset).toBe(false);
+    expect(plan.barsToUpdate.length).toBe(0);
+    expect(plan.nextLastTime).toBe(1700007200);
+  });
+
+  it('should trigger clean full reset if more than 3 new candles arrived after background sleep', () => {
+    const extendedBars = [
+      ...sampleBars,
+      { time: 1700010800, open: 84550, high: 84700, low: 84500, close: 84650 },
+      { time: 1700014400, open: 84650, high: 84800, low: 84600, close: 84750 },
+      { time: 1700018000, open: 84750, high: 84900, low: 84700, close: 84850 },
+      { time: 1700021600, open: 84850, high: 85000, low: 84800, close: 84950 }
+    ];
+    const plan = getSafeIncrementalBars(extendedBars, 1700007200);
+    expect(plan.needsFullReset).toBe(true);
+    expect(plan.nextLastTime).toBe(1700021600);
+  });
+
+  it('should sanitize, deduplicate, and strictly sort raw Binance kline arrays ascending', () => {
+    const raw = [
+      [1700007200000, '84400', '84600', '84300', '84500'],
+      [1700003600000, '84100', '84500', '84000', '84400'],
+      [1700007200000, '84400', '84650', '84300', '84550'], // duplicate with newer close
+      ['invalid', 'NaN', '0', '0', '0']
+    ];
+    const cleaned = sanitizeKlinesToOhlc(raw);
+    expect(cleaned.length).toBe(2);
+    expect(cleaned[0].time).toBe(1700003600);
+    expect(cleaned[1].time).toBe(1700007200);
+    expect(cleaned[1].close).toBe(84550);
+  });
+});
+
 
 

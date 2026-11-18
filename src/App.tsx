@@ -34,16 +34,32 @@ import {
   Sliders,
   LogOut,
   Search,
-  Trash2
+  Trash2,
+  Bell,
+  BellRing,
+  Plus
 } from 'lucide-react';
 import { AdMob } from '@capacitor-community/admob';
 import { Capacitor } from '@capacitor/core';
 import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
+import {
+  BASE_SUPPORTED_COINS,
+  CryptoCoin,
+  PriceAlert,
+  AlertConditionMode,
+  createPriceAlert,
+  evaluatePriceAlerts,
+  discoverNewLaunchedPairs,
+  playPriceAlertTone,
+  sendPriceAlertNotification,
+  isValidUsdtTradingPair
+} from './utils/pairsAndAlerts';
+import { sanitizeKlinesToOhlc, getSafeIncrementalBars } from './utils/chartHelpers';
 
 // -------------------------------------------------------------
 // CONFIGURATION & CONSTANTS
 // -------------------------------------------------------------
-const CURRENT_APP_VERSION = '1.0.9';
+const CURRENT_APP_VERSION = '1.2.4';
 
 const compareVersions = (v1: string, v2: string): number => {
   const p1 = (v1 || '').replace(/[^0-9.]/g, '').split('.').map(n => parseInt(n, 10) || 0);
@@ -117,7 +133,9 @@ const KEYS = {
   CODES: 'cw_premium_codes',
   SUGGESTIONS: 'cw_suggestions',
   SHARES: 'cw_shares_history',
-  AD_CONFIG: 'cw_ad_network_config'
+  AD_CONFIG: 'cw_ad_network_config',
+  PRICE_ALERTS: 'cw_price_alerts',
+  AUTO_PAIRS: 'cw_auto_discovered_pairs'
 };
 
 export const DEFAULT_AD_CONFIG = {
@@ -198,55 +216,16 @@ const PLAN_LIMITS: Record<string, number> = {
   ELITE: 20
 };
 
-interface CryptoCoin {
-  symbol: string;
-  name: string;
-  classTag: string;
-  isMain8: boolean;
-  basePrice: number;
-}
-
-const SUPPORTED_COINS: CryptoCoin[] = [
-  { symbol: 'BTCUSDT', name: 'Bitcoin', classTag: 'btc', isMain8: true, basePrice: 84500 },
-  { symbol: 'ETHUSDT', name: 'Ethereum', classTag: 'eth', isMain8: true, basePrice: 2420 },
-  { symbol: 'SOLUSDT', name: 'Solana', classTag: 'sol', isMain8: true, basePrice: 105.5 },
-  { symbol: 'BNBUSDT', name: 'Binance Coin', classTag: 'bnb', isMain8: true, basePrice: 725 },
-  { symbol: 'XRPUSDT', name: 'Ripple', classTag: 'xrp', isMain8: true, basePrice: 1.85 },
-  { symbol: 'DOGEUSDT', name: 'Dogecoin', classTag: 'doge', isMain8: true, basePrice: 0.082 },
-  { symbol: 'LINKUSDT', name: 'Chainlink', classTag: 'link', isMain8: true, basePrice: 12.4 },
-  { symbol: 'ADAUSDT', name: 'Cardano', classTag: 'ada', isMain8: true, basePrice: 0.52 },
-  { symbol: 'SUIUSDT', name: 'Sui Network', classTag: 'sui', isMain8: false, basePrice: 1.02 },
-  { symbol: 'PEPEUSDT', name: 'Pepe', classTag: 'pepe', isMain8: false, basePrice: 0.0000045 },
-  { symbol: 'SHIBUSDT', name: 'Shiba Inu', classTag: 'shib', isMain8: false, basePrice: 0.000012 },
-  { symbol: 'NEARUSDT', name: 'NEAR Protocol', classTag: 'near', isMain8: false, basePrice: 3.1 },
-  { symbol: 'AVAXUSDT', name: 'Avalanche', classTag: 'avax', isMain8: false, basePrice: 19.8 },
-  { symbol: 'DOTUSDT', name: 'Polkadot', classTag: 'dot', isMain8: false, basePrice: 4.8 },
-  { symbol: 'LTCUSDT', name: 'Litecoin', classTag: 'ltc', isMain8: false, basePrice: 88.5 }
-];
-
-interface WaitForData {
-  bias?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  resistance?: number;
-  support?: number;
-  longTrigger?: number;
-  shortTrigger?: number;
-  rejectionZone?: { low: number; high: number } | null;
-  pullbackZone?: { low: number; high: number } | null;
-  volumeNeeded?: number;
-  volumeNow?: number;
-  lines?: string[];
-  aiReason?: string;
-  capped?: boolean;
-}
+const SUPPORTED_COINS: CryptoCoin[] = BASE_SUPPORTED_COINS;
 
 interface TradingSignal {
   id: string;
   sheetRow?: number;
   symbol: string;
   timeframe: string;
-  direction: 'LONG' | 'SHORT' | 'NO_TRADE' | 'WAIT_LONG' | 'WAIT_SHORT';
+  direction: 'LONG' | 'SHORT' | 'NO_TRADE';
   signalDirection?: 'LONG' | 'SHORT' | 'NEUTRAL';
-  entryStatus: 'READY' | 'WAIT_PULLBACK' | 'WAIT_COUNTER_TREND' | 'WAIT_BETTER_RR' | 'CHOPPY_RANGE' | 'WAIT';
+  entryStatus: 'READY' | 'NO_TRADE';
   currentPrice: number;
   entry: number;
   suggestedEntry?: number;
@@ -267,7 +246,7 @@ interface TradingSignal {
   confidence: number;
   directionConfidence?: number;
   entryConfidence?: number;
-  signalQuality: 'STRONG' | 'MODERATE' | 'WEAK' | 'WAIT' | 'N/A';
+  signalQuality: 'STRONG' | 'MODERATE' | 'WEAK' | 'N/A';
   signalQualityDetails?: string;
   signalQualityScore?: string;
   model: string;
@@ -280,7 +259,6 @@ interface TradingSignal {
   warnings?: string[];
   userId?: string;
   userDisplayName?: string;
-  waitFor?: WaitForData | null;
 }
 
 interface UserProfile {
@@ -314,7 +292,7 @@ export const normalizeSignalTargets = (s: any): TradingSignal => {
       ? 'LONG'
       : rawDir === 'SELL' || rawDir === 'SHORT' || rawDir === 'BEARISH'
         ? 'SHORT'
-        : (s.direction || 'NO_TRADE');
+        : 'NO_TRADE';
   const isLong = normDir === 'LONG';
   const entry = Number(s.entry) || Number(s.currentPrice) || (s.symbol === 'PEPEUSDT' ? 0.0000045 : 100);
 
@@ -531,9 +509,63 @@ export default function App() {
 
 
 
-  // Market & Pricing
+  // Market & Pricing + Auto-Discovered Pairs + Price Alerts
   const [marketPrices, setMarketPrices] = useState<Record<string, number>>({});
   const [marketChanges, setMarketChanges] = useState<Record<string, number>>({});
+  const marketPricesRef = useRef<Record<string, number>>({});
+  useEffect(() => {
+    marketPricesRef.current = marketPrices;
+  }, [marketPrices]);
+
+  const [allCoins, setAllCoins] = useState<CryptoCoin[]>(() => {
+    try {
+      const raw = localStorage.getItem(KEYS.AUTO_PAIRS);
+      if (raw) {
+        const saved: CryptoCoin[] = JSON.parse(raw);
+        if (Array.isArray(saved)) {
+          const baseSet = new Set(BASE_SUPPORTED_COINS.map(c => c.symbol));
+          const validSaved = saved.filter(
+            c => c && isValidUsdtTradingPair(c.symbol) && !baseSet.has(c.symbol)
+          );
+          return [...BASE_SUPPORTED_COINS, ...validSaved];
+        }
+      }
+    } catch {}
+    return BASE_SUPPORTED_COINS;
+  });
+  const allCoinsRef = useRef<CryptoCoin[]>(allCoins);
+  useEffect(() => {
+    allCoinsRef.current = allCoins;
+  }, [allCoins]);
+  const [isSyncingNewPairs, setIsSyncingNewPairs] = useState(false);
+  const [pairSearchQuery, setPairSearchQuery] = useState('');
+
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => {
+    try {
+      const raw = localStorage.getItem(KEYS.PRICE_ALERTS);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const priceAlertsRef = useRef<PriceAlert[]>(priceAlerts);
+  useEffect(() => {
+    priceAlertsRef.current = priceAlerts;
+    try {
+      localStorage.setItem(KEYS.PRICE_ALERTS, JSON.stringify(priceAlerts));
+    } catch {}
+  }, [priceAlerts]);
+  const [alertsModalOpen, setAlertsModalOpen] = useState(false);
+  const [alertSymbol, setAlertSymbol] = useState('BTCUSDT');
+  const [alertTargetInput, setAlertTargetInput] = useState('');
+  const [alertConditionMode, setAlertConditionMode] = useState<AlertConditionMode>('AUTO');
+  const [alertNoteInput, setAlertNoteInput] = useState('');
+  const [notifPermission, setNotifPermission] = useState<string>(() =>
+    typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'unsupported'
+  );
+  const [triggeredAlertBanner, setTriggeredAlertBanner] = useState<PriceAlert | null>(null);
+
   const [selectedCoin, setSelectedCoin] = useState('BTCUSDT');
   const [selectedTimeframe, setSelectedTimeframe] = useState('1h');
   const [selectedModel, setSelectedModel] = useState('GEMINI');
@@ -542,6 +574,7 @@ export default function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanStep, setScanStep] = useState('');
   const [currentSignal, setCurrentSignal] = useState<TradingSignal | null>(null);
+  const [signalError, setSignalError] = useState<string | null>(null);
 
   // App Launch & Loading Sequence (Fast Boot)
   const [isAppLoading, setIsAppLoading] = useState(true);
@@ -1222,11 +1255,179 @@ export default function App() {
         setMarketPrices(prev => ({ ...prev, ...priceMap }));
         setMarketChanges(prev => ({ ...prev, ...changeMap }));
         evaluateActiveSignalsLive(priceMap, klinesMap);
+
+        // Evaluate active user Price Alerts against latest live Binance prices
+        if (Object.keys(priceMap).length > 0 && priceAlertsRef.current.length > 0) {
+          const { updatedAlerts, newlyTriggered } = evaluatePriceAlerts(priceAlertsRef.current, priceMap);
+          if (newlyTriggered.length > 0) {
+            setPriceAlerts(updatedAlerts);
+            playPriceAlertTone();
+            setTriggeredAlertBanner(newlyTriggered[0]);
+            newlyTriggered.forEach(hit => {
+              const dirTxt = hit.condition === 'ABOVE' ? 'reached above' : 'dropped below';
+              const formattedHit = formatCryptoPrice(hit.triggeredPrice || hit.targetPrice);
+              const formattedTarget = formatCryptoPrice(hit.targetPrice);
+              const alertMsg = `🔔 PRICE ALERT: ${hit.symbol} ${dirTxt} $${formattedTarget} (Live: $${formattedHit})`;
+              showToast(alertMsg, 'success');
+              sendPriceAlertNotification(`CryptoWorld Price Alert: ${hit.symbol}`, `${hit.symbol} hit $${formattedHit} (Target: $${formattedTarget})`);
+            });
+          }
+        }
       }
     } catch (e) {
       console.warn('Market tickers fetch error:', e);
     }
   }, [evaluateActiveSignalsLive, fetchKlinesForSymbol]);
+
+  // -------------------------------------------------------------
+  // AUTO-DISCOVER NEWLY LAUNCHED BINANCE USDT PAIRS
+  // -------------------------------------------------------------
+  const syncNewlyLaunchedPairs = useCallback(async (silent = false) => {
+    setIsSyncingNewPairs(true);
+    try {
+      const infoEndpoints = [
+        'https://fapi.binance.com/fapi/v1/exchangeInfo',
+        '/api/binance-exchange-info',
+        'https://data-api.binance.vision/api/v3/exchangeInfo'
+      ];
+      let exchangeSymbols: any[] | null = null;
+      for (const url of infoEndpoints) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) {
+            const json: any = await res.json();
+            if (Array.isArray(json?.symbols) && json.symbols.length > 0) {
+              exchangeSymbols = json.symbols;
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      if (!exchangeSymbols) {
+        if (!silent) showToast('Binance se naye pairs check nahi ho sake. Baad mein koshish karein.', 'error');
+        return;
+      }
+
+      const { mergedCoins, newlyAddedCoins } = discoverNewLaunchedPairs(
+        allCoinsRef.current,
+        exchangeSymbols,
+        marketPricesRef.current,
+        { recentWindowDays: 90, maxAutoPairs: 50 }
+      );
+
+      if (newlyAddedCoins.length > 0) {
+        setAllCoins(mergedCoins);
+        try {
+          const baseSet = new Set(BASE_SUPPORTED_COINS.map(c => c.symbol));
+          const autoOnly = mergedCoins.filter(c => !baseSet.has(c.symbol));
+          localStorage.setItem(KEYS.AUTO_PAIRS, JSON.stringify(autoOnly));
+        } catch {}
+        const previewNames = newlyAddedCoins.slice(0, 3).map(c => c.symbol).join(', ');
+        showToast(
+          `🆕 ${newlyAddedCoins.length} new launched pair${newlyAddedCoins.length > 1 ? 's' : ''} auto-added: ${previewNames}`,
+          'success'
+        );
+        sendPriceAlertNotification(
+          'CryptoWorld: New Pairs Added',
+          `${newlyAddedCoins.length} newly launched Binance pairs added (${previewNames}).`
+        );
+      } else if (!silent) {
+        showToast(`✅ Sab pairs up-to-date hain (${allCoinsRef.current.length} active pairs).`, 'info');
+      }
+    } catch (e) {
+      console.warn('Auto pair discovery error:', e);
+    } finally {
+      setIsSyncingNewPairs(false);
+    }
+  }, []);
+
+  // -------------------------------------------------------------
+  // PRICE ALERT HANDLERS
+  // -------------------------------------------------------------
+  const openAlertModalForCoin = (symbolToSelect?: string) => {
+    const targetSym = symbolToSelect || selectedCoin || 'BTCUSDT';
+    setAlertSymbol(targetSym);
+    const liveP = marketPrices[targetSym] || allCoinsRef.current.find(c => c.symbol === targetSym)?.basePrice || 0;
+    setAlertTargetInput(liveP > 0 ? String(liveP) : '');
+    setAlertConditionMode('AUTO');
+    setAlertNoteInput('');
+    setAlertsModalOpen(true);
+  };
+
+  const handleRequestNotificationPermission = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setNotifPermission('unsupported');
+      showToast('Browser notifications is device par supported nahi hain (in-app & audio alerts active rahengi).', 'info');
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+      if (perm === 'granted') {
+        showToast('🔔 Push/Browser Notifications enable ho gayin!', 'success');
+      } else {
+        showToast('Notifications permission deny hui; in-app aur sound alerts active rahengi.', 'info');
+      }
+    } catch {
+      showToast('Notification permission request fail hui.', 'error');
+    }
+  };
+
+  const handleCreatePriceAlert = (e: React.FormEvent) => {
+    e.preventDefault();
+    const liveP = marketPrices[alertSymbol] || allCoinsRef.current.find(c => c.symbol === alertSymbol)?.basePrice || 0;
+    const res = createPriceAlert({
+      symbol: alertSymbol,
+      targetPrice: parseFloat(alertTargetInput),
+      currentPrice: liveP,
+      conditionMode: alertConditionMode,
+      note: alertNoteInput
+    });
+
+    if (!res.ok) {
+      showToast(res.error, 'error');
+      return;
+    }
+
+    setPriceAlerts(prev => [res.alert, ...prev]);
+    setAlertTargetInput('');
+    setAlertNoteInput('');
+    const dirLabel = res.alert.condition === 'ABOVE' ? 'Above ≥' : 'Below ≤';
+    showToast(`🔔 Alert set: ${res.alert.symbol} ${dirLabel} $${formatCryptoPrice(res.alert.targetPrice)}`, 'success');
+
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().then(perm => setNotifPermission(perm)).catch(() => {});
+    }
+  };
+
+  const handleDeletePriceAlert = (id: string) => {
+    setPriceAlerts(prev => prev.filter(a => a.id !== id));
+    showToast('Price alert remove ho gaya.', 'info');
+  };
+
+  const handleRearmPriceAlert = (id: string) => {
+    setPriceAlerts(prev =>
+      prev.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              triggered: false,
+              triggeredAt: undefined,
+              triggeredPrice: undefined,
+              createdAt: Date.now()
+            }
+          : a
+      )
+    );
+    showToast('🔄 Alert dubara active kar diya gaya hai!', 'success');
+  };
+
+  const handleClearTriggeredAlerts = () => {
+    setPriceAlerts(prev => prev.filter(a => !a.triggered));
+    setTriggeredAlertBanner(null);
+    showToast('Triggered alert history clear ho gayi.', 'info');
+  };
 
   // -------------------------------------------------------------
   // FETCH OPEN SIGNALS FROM GOOGLE SHEET JOURNAL TAB (OPEN ONLY)
@@ -1505,6 +1706,7 @@ export default function App() {
     loadJournals();
     fetchOpenSignalsFromSheet();
     fetchMarketTickers();
+    syncNewlyLaunchedPairs(true);
     fetchSheetAccuracy();
     fetchGlobalAdConfig();
     checkAppVersion();
@@ -1539,15 +1741,17 @@ export default function App() {
     window.addEventListener('focus', handleWindowFocus);
 
     const interval = setInterval(() => fetchMarketTickers(), 10000);
+    const newPairsInterval = setInterval(() => syncNewlyLaunchedPairs(true), 5 * 60 * 1000);
 
     return () => {
       isMounted = false;
       clearTimeout(timer);
       clearInterval(interval);
+      clearInterval(newPairsInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [fetchMarketTickers, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, checkAppVersion, triggerAppOpeningAd]);
+  }, [fetchMarketTickers, syncNewlyLaunchedPairs, fetchOpenSignalsFromSheet, fetchSheetAccuracy, fetchGlobalAdConfig, checkAppVersion, triggerAppOpeningAd]);
 
   // Sync with Google Sheet when user changes/logs in
   useEffect(() => {
@@ -2294,7 +2498,8 @@ export default function App() {
     }
 
     setIsScanning(true);
-    setScanStep('Binance Live Candlesticks & Volume Stream Fetch...');
+    setSignalError(null);
+    setScanStep('Binance Live Candlesticks (100 Candles) & Volume Stream Fetch...');
 
     try {
       // 2. Fetch live Binance multi-timeframe candles directly (250 candles for accurate EMA200 & RSI14)
@@ -2363,8 +2568,8 @@ export default function App() {
       candles[candles.length - 1][4] = livePrice;
       setMarketPrices(prev => ({ ...prev, [selectedCoin]: livePrice }));
 
-      // Format last 50 candles with both OHLC object keys and array indices for backend momentum analysis
-      const formatCandlesForBackend = (rawCandles: number[][], limit = 50) => {
+      // Format last 100 candles with both OHLC object keys and array indices for V7 momentum analysis
+      const formatCandlesForBackend = (rawCandles: number[][], limit = 100) => {
         return rawCandles.slice(-limit).map(k => ({
           0: Number(k[0]),
           1: Number(k[1]),
@@ -2393,9 +2598,9 @@ export default function App() {
       const ind4h = computeIndicators(valid4h, livePrice);
       const ind1d = computeIndicators(valid1d, livePrice);
 
-      const recent50Candles = formatCandlesForBackend(candles, 50);
-      const recent50Candles4h = formatCandlesForBackend(valid4h, 50);
-      const recent50Candles1d = formatCandlesForBackend(valid1d, 50);
+      const recent100Candles = formatCandlesForBackend(candles, 100);
+      const recent100Candles4h = formatCandlesForBackend(valid4h, 100);
+      const recent100Candles1d = formatCandlesForBackend(valid1d, 100);
 
       const payload = {
         action: 'signal',
@@ -2465,22 +2670,31 @@ export default function App() {
           resistance: ind1d.resistance,
           trend: livePrice >= ind1d.ema20 ? 'BULLISH' : 'BEARISH'
         },
-        recentCandles: recent50Candles,
-        candles4h: recent50Candles4h,
-        candles1d: recent50Candles1d
+        recentCandles: recent100Candles,
+        candles4h: recent100Candles4h,
+        candles1d: recent100Candles1d
       };
 
       setScanStep('AI is analyzing market momentum...');
       const res = await callBackend('signal', payload);
 
       if (!res || res.error) {
-        showToast(res?.message || 'Apps Script AI Engine se signal generate nahi ho saka.', 'error');
+        const errMsg = res?.message || 'AI API se signal generate nahi ho saka. Dobara koshish karein.';
+        setSignalError(errMsg);
+        setCurrentSignal(null);
+        showToast(errMsg, 'error');
         return;
       }
 
-      // Success response from code.gs!
-      const direction = res.direction || 'NO_TRADE';
-      const isReady = res.entryStatus === 'READY';
+      // Success response from V7 Momentum Focused backend (LONG, SHORT, or NO_TRADE when market is flat)
+      const rawDir = String(res.direction || 'NO_TRADE').toUpperCase().trim();
+      const direction: 'LONG' | 'SHORT' | 'NO_TRADE' =
+        rawDir === 'LONG' || rawDir === 'BUY' || rawDir === 'BULLISH'
+          ? 'LONG'
+          : rawDir === 'SHORT' || rawDir === 'SELL' || rawDir === 'BEARISH'
+            ? 'SHORT'
+            : 'NO_TRADE';
+      const isActionable = direction === 'LONG' || direction === 'SHORT';
       const livePriceNumber = Number(livePrice) || (selectedCoin === 'PEPEUSDT' ? 0.0000045 : 84500);
       const entryPrice = Number(res.entry) || Number(res.entryPrice) || livePriceNumber;
 
@@ -2506,9 +2720,9 @@ export default function App() {
         id: `SIG-${Date.now()}`,
         symbol: selectedCoin,
         timeframe: selectedTimeframe,
-        direction: direction,
-        signalDirection: res.signalDirection || (direction.includes('LONG') ? 'LONG' : (direction.includes('SHORT') ? 'SHORT' : 'NEUTRAL')),
-        entryStatus: res.entryStatus || (direction === 'NO_TRADE' ? 'WAIT' : 'READY'),
+        direction,
+        signalDirection: isActionable ? direction : 'NEUTRAL',
+        entryStatus: isActionable ? 'READY' : 'NO_TRADE',
         currentPrice: livePriceNumber,
         entry: targetLevels.entry,
         suggestedEntry: res.suggestedEntry,
@@ -2529,25 +2743,25 @@ export default function App() {
         confidence: res.confidence || 75,
         directionConfidence: res.directionConfidence,
         entryConfidence: res.entryConfidence,
-        signalQuality: res.signalQuality || (isReady ? 'STRONG' : 'WAIT'),
+        signalQuality: isActionable ? (res.signalQuality && res.signalQuality !== 'WAIT' ? res.signalQuality : 'STRONG') : 'N/A',
         signalQualityDetails: res.signalQualityDetails,
         signalQualityScore: res.signalQualityScore,
-        model: res.model || 'openai/gpt-oss-120b',
+        model: res.model || 'V7-Momentum-AI',
         timestamp: Date.now(),
         resolved: false,
-        outcome: isReady ? 'OPEN' : null,
+        outcome: isActionable ? 'OPEN' : null,
         userId: user.username,
         userDisplayName: user.username.toUpperCase(),
-        reasoning: res.reasoning || '',
+        reasoning: res.reasoning || (direction === 'NO_TRADE' ? 'Market flat hai, koi signal nahi mila.' : ''),
         warnings: res.warnings || [],
-        waitFor: res.waitFor || null,
         sheetRow: Number(res.sheetRow || res.row || res.journalRow || 0)
       };
 
+      setSignalError(null);
       setCurrentSignal(newSignal);
 
-      // Save to Local Journals (only if actionable OPEN trade)
-      if (isReady && (direction === 'LONG' || direction === 'SHORT')) {
+      // Save to Local Journals (only if actionable LONG/SHORT trade)
+      if (isActionable) {
         setUserJournal(prev => {
           const updated = [newSignal, ...prev.filter(s => s.id !== newSignal.id)];
           localStorage.setItem(`${KEYS.JOURNAL_USER_PREFIX}${user.username}`, JSON.stringify(updated));
@@ -2575,14 +2789,15 @@ export default function App() {
       fetchSheetAccuracy();
 
       if (direction === 'NO_TRADE') {
-        showToast('Market condition risky hai. NO_TRADE shield trigger hui (Quota cost 0.25).', 'info');
-      } else if (direction.startsWith('WAIT')) {
-        showToast(`${direction.replace('_', ' ')} setup identify hua. Retest / pullback ka intezar karein!`, 'info');
+        showToast('Market flat hai, koi signal nahi mila', 'info');
       } else {
-        showToast(`Shandar! ${selectedCoin} ${direction} signal Google Sheet Journal mein save ho gaya! (Model: ${res.model})`, 'success');
+        const badgeLabel = direction === 'LONG' ? 'BUY' : 'SELL';
+        showToast(`Shandar! ${selectedCoin} ${badgeLabel} (${direction}) signal Google Sheet Journal mein save ho gaya! (Model: ${res.model || 'V7-Momentum'})`, 'success');
       }
     } catch (err: any) {
-      showToast('Signal generate karne mein kharabi: ' + (err.message || 'Error'), 'error');
+      const errMsg = 'Signal generate karne mein kharabi: ' + (err.message || 'Backend Error');
+      setSignalError(errMsg);
+      showToast(errMsg, 'error');
     } finally {
       setIsScanning(false);
       setScanStep('');
@@ -2612,7 +2827,7 @@ export default function App() {
     container.innerHTML = '';
     setIsChartLoading(true);
 
-    const coinMeta = SUPPORTED_COINS.find(c => c.symbol === selectedCoin);
+    const coinMeta = allCoinsRef.current.find(c => c.symbol === selectedCoin);
     const refPrice = coinMeta?.basePrice || 100;
     const precision = refPrice < 0.001 ? 8 : (refPrice < 1 ? 4 : (refPrice < 10 ? 3 : 2));
     const minMove = Number((1 / Math.pow(10, precision)).toFixed(precision));
@@ -2658,53 +2873,54 @@ export default function App() {
 
     let isDisposed = false;
     let initialLoaded = false;
+    let currentSeriesLastTime: number | null = null;
 
     const loadAndTrackChartKlines = async () => {
       const klines = await fetchKlinesForSymbol(selectedCoin, selectedTimeframe, 180);
       if (isDisposed) return;
 
-      if (!Array.isArray(klines) || klines.length === 0) {
-        setIsChartLoading(false);
-        return;
-      }
-
-      // Deduplicate and sort strictly ascending by time to prevent Lightweight Charts assertion errors
-      const byTime = new Map<number, { time: any; open: number; high: number; low: number; close: number }>();
-      for (const k of klines) {
-        const t = Math.floor(Number(k[0]) / 1000);
-        const o = parseFloat(k[1]);
-        const h = parseFloat(k[2]);
-        const l = parseFloat(k[3]);
-        const c = parseFloat(k[4]);
-        if (Number.isFinite(t) && t > 0 && Number.isFinite(o) && Number.isFinite(h) && Number.isFinite(l) && Number.isFinite(c)) {
-          byTime.set(t, { time: t as any, open: o, high: h, low: l, close: c });
-        }
-      }
-
-      const uniqueSorted = Array.from(byTime.values()).sort((a, b) => Number(a.time) - Number(b.time));
+      const uniqueSorted = sanitizeKlinesToOhlc(klines);
 
       if (uniqueSorted.length > 0 && !isDisposed) {
         if (!initialLoaded) {
-          candleSeries.setData(uniqueSorted);
+          candleSeries.setData(uniqueSorted as any);
           chart.timeScale().fitContent();
           initialLoaded = true;
+          currentSeriesLastTime = uniqueSorted[uniqueSorted.length - 1].time;
           setIsChartLoading(false);
         } else {
-          // Smooth incremental update of the last 2 bars without resetting canvas or causing flicker
-          const secondLast = uniqueSorted[uniqueSorted.length - 2];
-          const last = uniqueSorted[uniqueSorted.length - 1];
-          if (secondLast) candleSeries.update(secondLast);
-          if (last) candleSeries.update(last);
+          // Safe incremental update: NEVER pass bars older than currentSeriesLastTime to series.update()
+          const seriesLatestTime = lwLastCandleRef.current?.time
+            ? Math.max(currentSeriesLastTime ?? 0, lwLastCandleRef.current.time)
+            : currentSeriesLastTime;
+          const plan = getSafeIncrementalBars(uniqueSorted, seriesLatestTime);
+
+          try {
+            if (plan.needsFullReset) {
+              candleSeries.setData(uniqueSorted as any);
+            } else {
+              for (const bar of plan.barsToUpdate) {
+                candleSeries.update(bar as any);
+              }
+            }
+            currentSeriesLastTime = plan.nextLastTime;
+          } catch {
+            // Safe fallback if series state diverged
+            candleSeries.setData(uniqueSorted as any);
+            currentSeriesLastTime = uniqueSorted[uniqueSorted.length - 1].time;
+          }
         }
 
         const latestBar = uniqueSorted[uniqueSorted.length - 1];
-        lwLastCandleRef.current = {
-          time: Number(latestBar.time),
-          open: latestBar.open,
-          high: latestBar.high,
-          low: latestBar.low,
-          close: latestBar.close
-        };
+        if (!lwLastCandleRef.current || latestBar.time >= lwLastCandleRef.current.time) {
+          lwLastCandleRef.current = {
+            time: latestBar.time,
+            open: latestBar.open,
+            high: latestBar.high,
+            low: latestBar.low,
+            close: latestBar.close
+          };
+        }
 
         setMarketPrices(prev => (prev[selectedCoin] === latestBar.close ? prev : { ...prev, [selectedCoin]: latestBar.close }));
       } else {
@@ -2838,9 +3054,9 @@ export default function App() {
     };
   }, [displayedSignals, marketPrices, sheetAccuracy]);
 
-  // Dynamic AI Quantitative Radar Hot Pairs computed from live market changes
+  // Dynamic AI Quantitative Radar Hot Pairs computed from live market changes across all 35+ & newly launched pairs
   const recommendedHotPairs = useMemo(() => {
-    const list = SUPPORTED_COINS.map(c => {
+    const list = allCoins.map(c => {
       const price = marketPrices[c.symbol] || c.basePrice;
       const change = marketChanges[c.symbol] || 0;
       const isPositive = change >= 0;
@@ -2891,7 +3107,7 @@ export default function App() {
         reason: `${dipRebound.change >= 0 ? '+' : ''}${dipRebound.change.toFixed(2)}% in last 24 hours`
       }
     ];
-  }, [marketPrices, marketChanges]);
+  }, [allCoins, marketPrices, marketChanges]);
 
   // Auth Submit (Login / Register to Google Sheet)
   const handleAuth = async (e: React.FormEvent) => {
@@ -3286,6 +3502,37 @@ export default function App() {
             </button>
           )}
 
+          <button
+            className="btn-icon"
+            onClick={() => openAlertModalForCoin(selectedCoin)}
+            title="Price Alerts"
+            style={{ position: 'relative', color: 'var(--accent-cyan)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            {priceAlerts.some(a => a.triggered) ? <BellRing size={18} color="#ffb300" /> : <Bell size={18} />}
+            {priceAlerts.filter(a => !a.triggered).length > 0 && (
+              <span
+                style={{
+                  position: 'absolute',
+                  top: '-4px',
+                  right: '-4px',
+                  minWidth: '16px',
+                  height: '16px',
+                  borderRadius: '999px',
+                  background: '#00d2ff',
+                  color: '#000',
+                  fontSize: '0.62rem',
+                  fontWeight: 900,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '0 4px'
+                }}
+              >
+                {priceAlerts.filter(a => !a.triggered).length}
+              </span>
+            )}
+          </button>
+
           <button className="btn-icon" onClick={() => setPremiumModalOpen(true)} title="VIP Upgrade" style={{ color: 'var(--accent-yellow)' }}>
             <Star size={18} fill="#ffb300" />
           </button>
@@ -3400,6 +3647,69 @@ export default function App() {
 
       {/* Main Content */}
       <main className="app-main">
+        {/* Triggered Price Alert Banner */}
+        {triggeredAlertBanner && (
+          <div
+            className="material-card"
+            style={{
+              border: '1px solid #00e676',
+              background: 'rgba(0, 230, 118, 0.12)',
+              padding: '12px 16px',
+              marginBottom: '12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '10px',
+              flexWrap: 'wrap'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <BellRing size={20} color="#00e676" />
+              <div>
+                <div style={{ fontWeight: 800, color: '#00e676', fontSize: '0.9rem' }}>
+                  Price Target Hit: {triggeredAlertBanner.symbol}
+                </div>
+                <div style={{ fontSize: '0.8rem', color: '#fff' }}>
+                  {triggeredAlertBanner.condition === 'ABOVE' ? 'Crossed above' : 'Dropped below'} ${formatCryptoPrice(triggeredAlertBanner.targetPrice)} (Hit at ${formatCryptoPrice(triggeredAlertBanner.triggeredPrice || triggeredAlertBanner.targetPrice)})
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ fontSize: '0.75rem', padding: '5px 10px' }}
+                onClick={() => {
+                  setSelectedCoin(triggeredAlertBanner.symbol);
+                  setActiveTab('chart');
+                  setTriggeredAlertBanner(null);
+                }}
+              >
+                Open Chart
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ fontSize: '0.75rem', padding: '5px 10px', borderColor: '#00e676', color: '#00e676' }}
+                onClick={() => {
+                  setAlertsModalOpen(true);
+                  setTriggeredAlertBanner(null);
+                }}
+              >
+                Manage Alerts
+              </button>
+              <button
+                type="button"
+                onClick={() => setTriggeredAlertBanner(null)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '4px' }}
+                aria-label="Dismiss price alert"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* User Status Bar with Google Sheet Verification Badge */}
         <div className="user-panel-bar material-card">
           <div className="stat-item">
@@ -3525,22 +3835,54 @@ export default function App() {
               <div className="controls-bar">
                 <div className="selector-group">
                   <div>
-                    <label className="form-label">Select Crypto Pair</label>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', gap: '8px' }}>
+                      <label className="form-label" style={{ marginBottom: 0 }}>
+                        Select Crypto Pair ({allCoins.length} Pairs)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => openAlertModalForCoin(selectedCoin)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          background: 'rgba(0, 210, 255, 0.12)',
+                          color: 'var(--accent-cyan)',
+                          border: '1px solid rgba(0, 210, 255, 0.35)',
+                          borderRadius: '6px',
+                          padding: '2px 8px',
+                          fontSize: '0.72rem',
+                          fontWeight: 700,
+                          cursor: 'pointer'
+                        }}
+                        title={`Set target price alert for ${selectedCoin}`}
+                      >
+                        <Bell size={12} />
+                        <span>Set Alert</span>
+                      </button>
+                    </div>
                     <select
                       className="app-select"
                       value={selectedCoin}
                       onChange={e => setSelectedCoin(e.target.value)}
                     >
                       <optgroup label="Benchmark Pairs">
-                        {SUPPORTED_COINS.filter(c => c.isMain8).map(c => (
+                        {allCoins.filter(c => c.isMain8).map(c => (
                           <option key={c.symbol} value={c.symbol}>{c.symbol} ({c.name})</option>
                         ))}
                       </optgroup>
-                      <optgroup label="Trending Altcoins">
-                        {SUPPORTED_COINS.filter(c => !c.isMain8).map(c => (
+                      <optgroup label="Popular Altcoins (35+ Pairs)">
+                        {allCoins.filter(c => !c.isMain8 && !c.isNewLaunch).map(c => (
                           <option key={c.symbol} value={c.symbol}>{c.symbol} ({c.name})</option>
                         ))}
                       </optgroup>
+                      {allCoins.some(c => c.isNewLaunch) && (
+                        <optgroup label="🆕 New Launches (Auto-Detected)">
+                          {allCoins.filter(c => c.isNewLaunch).map(c => (
+                            <option key={c.symbol} value={c.symbol}>🆕 {c.symbol} ({c.name})</option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </div>
 
@@ -3660,129 +4002,89 @@ export default function App() {
                     {scanStep || 'AI is analyzing market momentum...'}
                   </div>
                   <div style={{ marginTop: '4px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                    Syncing 50 OHLC candles ({selectedTimeframe}) + HTF (4H & 1D) + Live Price for {selectedCoin}
+                    Syncing 100 OHLC candles ({selectedTimeframe}) + HTF (4H & 1D) + Live Price for {selectedCoin}
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Generated Signal Output with Live Market PnL Progress Bar & WAIT / NO_TRADE Handling */}
+            {/* Backend / AI API Error Alert Banner */}
+            {signalError && !isScanning && (
+              <div
+                className="material-card"
+                style={{
+                  border: '1px solid #ff4d4d',
+                  background: 'rgba(255, 77, 77, 0.08)',
+                  padding: '16px',
+                  marginBottom: '14px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: '12px'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                  <AlertTriangle size={20} color="#ff4d4d" style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <div>
+                    <div style={{ color: '#ff6b8b', fontWeight: 800, fontSize: '0.92rem', marginBottom: '4px' }}>
+                      Signal Generation Error
+                    </div>
+                    <div style={{ color: '#fff', fontSize: '0.84rem', lineHeight: 1.5 }}>
+                      {signalError}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSignalError(null)}
+                  style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '4px' }}
+                  aria-label="Dismiss error"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            )}
+
+            {/* Generated Signal Output (LONG/BUY, SHORT/SELL, or Simple Flat Market NO_TRADE) */}
             {currentSignal && !isScanning && (() => {
               const livePrice = marketPrices[currentSignal.symbol] || currentSignal.currentPrice || currentSignal.entry;
               const isNoTrade = currentSignal.direction === 'NO_TRADE';
-              const isWaitState = currentSignal.direction.startsWith('WAIT');
 
-              // 1. NO_TRADE RENDERING
+              // 1. SIMPLE FLAT MARKET NO_TRADE RENDERING (No old WAIT design)
               if (isNoTrade) {
                 return (
-                  <div className="material-card signal-box" style={{ border: '1px solid #ffcc00' }}>
-                    <div className="signal-header-row">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <span style={{ background: '#ffcc00', color: '#000', fontWeight: 800, padding: '4px 10px', borderRadius: '4px', fontSize: '0.8rem' }}>
-                          🛡️ NO TRADE (MARKET SHIELD)
-                        </span>
-                        <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>{currentSignal.symbol}</span>
-                        <span style={{ fontSize: '0.78rem', background: '#1c2336', padding: '2px 8px', borderRadius: '4px', color: 'var(--text-secondary)' }}>
-                          {currentSignal.timeframe}
-                        </span>
-                      </div>
-                      <span className="badge-quality moderate">CONFIDENCE: {currentSignal.confidence}%</span>
+                  <div className="material-card signal-box" style={{ border: '1px solid #ffcc00', textAlign: 'center', padding: '24px 20px' }}>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'rgba(255, 204, 0, 0.14)', color: '#ffcc00', border: '1px solid rgba(255, 204, 0, 0.35)', padding: '6px 14px', borderRadius: '8px', fontWeight: 800, fontSize: '0.85rem', marginBottom: '12px' }}>
+                      <AlertTriangle size={16} />
+                      <span>Market Flat - No Trade</span>
                     </div>
-
-                    <div style={{ background: 'rgba(255,204,0,0.08)', border: '1px solid rgba(255,204,0,0.25)', padding: '14px', borderRadius: '8px', marginTop: '12px' }}>
-                      <div style={{ color: '#ffcc00', fontWeight: 700, marginBottom: '6px' }}>⚠️ AI Strategic Reasoning:</div>
-                      <p style={{ color: '#fff', fontSize: '0.88rem', margin: 0, lineHeight: 1.6 }}>{currentSignal.reasoning}</p>
+                    <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#fff', marginBottom: '6px' }}>
+                      {currentSignal.symbol} ({currentSignal.timeframe})
                     </div>
-
-                    {currentSignal.waitFor && currentSignal.waitFor.lines && currentSignal.waitFor.lines.length > 0 && (
-                      <div style={{ marginTop: '12px', background: '#0e1320', border: '1px solid var(--border-color)', padding: '14px', borderRadius: '8px' }}>
-                        <div style={{ color: 'var(--accent-cyan)', fontWeight: 700, marginBottom: '8px' }}>
-                          📋 Next Valid Setup Conditions (Wait For):
-                        </div>
-                        <ul style={{ margin: 0, paddingLeft: '18px', color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.7 }}>
-                          {currentSignal.waitFor.lines.map((line, idx) => (
-                            <li key={idx} style={{ marginBottom: '4px' }}>{line}</li>
-                          ))}
-                        </ul>
-                      </div>
+                    <p style={{ color: '#e2e8f0', fontSize: '0.92rem', margin: '0 0 12px', lineHeight: 1.5 }}>
+                      Market flat hai, koi signal nahi mila
+                    </p>
+                    {currentSignal.reasoning && currentSignal.reasoning !== 'Market flat hai, koi signal nahi mila.' && (
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', margin: '0 0 12px', lineHeight: 1.5 }}>
+                        {currentSignal.reasoning}
+                      </p>
                     )}
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      <span>AI Engine: <strong style={{ color: 'var(--accent-cyan)' }}>{currentSignal.model}</strong></span>
-                      <span>Quota Deducted: <strong style={{ color: '#ffcc00' }}>0.25 (Shield Cost)</strong></span>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      AI Engine: <strong style={{ color: 'var(--accent-cyan)' }}>{currentSignal.model}</strong>
                     </div>
                   </div>
                 );
               }
 
-              // 2. WAIT FOR PULLBACK / RETEST RENDERING
-              if (isWaitState) {
-                const waitLabel = currentSignal.direction === 'WAIT_LONG' ? 'WAIT FOR PULLBACK (LONG)' : 'WAIT FOR RETEST (SHORT)';
-                return (
-                  <div className="material-card signal-box" style={{ border: '1px solid var(--accent-cyan)' }}>
-                    <div className="signal-header-row">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <span style={{ background: '#00d2ff', color: '#000', fontWeight: 800, padding: '4px 10px', borderRadius: '4px', fontSize: '0.8rem' }}>
-                          ⏳ {waitLabel}
-                        </span>
-                        <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>{currentSignal.symbol}</span>
-                        <span style={{ fontSize: '0.78rem', background: '#1c2336', padding: '2px 8px', borderRadius: '4px', color: 'var(--text-secondary)' }}>
-                          {currentSignal.timeframe}
-                        </span>
-                      </div>
-                      <span className="badge-quality moderate">{currentSignal.entryStatus.replace('_', ' ')}</span>
-                    </div>
-
-                    <div className="tracker-levels-row" style={{ marginTop: '12px' }}>
-                      <div className="tracker-lvl-item">
-                        <div className="t-lbl">SUGGESTED ENTRY</div>
-                        <div className="t-val cyan">${(currentSignal.suggestedEntry || currentSignal.currentPrice).toLocaleString()}</div>
-                      </div>
-                      <div className="tracker-lvl-item">
-                        <div className="t-lbl">TRIGGER PRICE</div>
-                        <div className="t-val green">${(currentSignal.triggerPrice || currentSignal.currentPrice).toLocaleString()}</div>
-                      </div>
-                      <div className="tracker-lvl-item">
-                        <div className="t-lbl">INVALIDATION SL</div>
-                        <div className="t-val red">${(currentSignal.invalidationPrice || 0).toLocaleString()}</div>
-                      </div>
-                    </div>
-
-                    <div style={{ background: 'rgba(0,210,255,0.08)', border: '1px solid rgba(0,210,255,0.2)', padding: '14px', borderRadius: '8px', marginTop: '12px' }}>
-                      <div style={{ color: 'var(--accent-cyan)', fontWeight: 700, marginBottom: '6px' }}>💡 Pullback Strategy Analysis:</div>
-                      <p style={{ color: '#fff', fontSize: '0.88rem', margin: 0, lineHeight: 1.6 }}>{currentSignal.reasoning}</p>
-                    </div>
-
-                    {currentSignal.waitFor && currentSignal.waitFor.lines && currentSignal.waitFor.lines.length > 0 && (
-                      <div style={{ marginTop: '12px', background: '#0e1320', border: '1px solid var(--border-color)', padding: '14px', borderRadius: '8px' }}>
-                        <div style={{ color: 'var(--accent-green)', fontWeight: 700, marginBottom: '8px' }}>
-                          🎯 Execution Trigger Checklist:
-                        </div>
-                        <ul style={{ margin: 0, paddingLeft: '18px', color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.7 }}>
-                          {currentSignal.waitFor.lines.map((line, idx) => (
-                            <li key={idx} style={{ marginBottom: '4px' }}>{line}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      <span>AI Engine: <strong style={{ color: 'var(--accent-cyan)' }}>{currentSignal.model}</strong></span>
-                      <span>Quota Deducted: <strong style={{ color: '#00d2ff' }}>0.25 (Wait Cost)</strong></span>
-                    </div>
-                  </div>
-                );
-              }
-
-              // 3. READY TO TRADE RENDERING
+              // 2. BUY (LONG) / SELL (SHORT) SIGNAL CARD RENDERING
               const pnl = calculateSignalPnLProgress(currentSignal, livePrice);
 
               return (
                 <div className="material-card signal-box" style={{ border: '1px solid var(--accent-cyan)' }}>
                   <div className="signal-header-row">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <span className={`signal-badge-direction ${currentSignal.direction.toLowerCase()}`}>
-                        {currentSignal.direction === 'LONG' ? 'BUY / LONG' : 'SELL / SHORT'}
+                      <span className={`signal-badge-direction ${currentSignal.direction}`}>
+                        {currentSignal.direction === 'LONG' ? 'BUY' : 'SELL'}
                       </span>
                       <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff' }}>{currentSignal.symbol}</span>
                       <span style={{ fontSize: '0.78rem', background: '#1c2336', padding: '2px 8px', borderRadius: '4px', color: 'var(--text-secondary)' }}>
@@ -4238,11 +4540,20 @@ export default function App() {
           <div className="tab-pane active">
             <div className="material-card">
               <div className="chart-header-row" style={{ flexWrap: 'wrap', gap: '8px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span className="chart-price-large">${(marketPrices[selectedCoin] || 84500).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <span className="chart-price-large">${formatCryptoPrice(marketPrices[selectedCoin] || allCoins.find(c => c.symbol === selectedCoin)?.basePrice || 84500)}</span>
                   <span className={`chart-change-badge ${(marketChanges[selectedCoin] || 0) >= 0 ? 'up' : 'down'}`}>
                     {(marketChanges[selectedCoin] || 0) >= 0 ? '+' : ''}{(marketChanges[selectedCoin] || 0).toFixed(2)}%
                   </span>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => openAlertModalForCoin(selectedCoin)}
+                    style={{ fontSize: '0.75rem', padding: '5px 10px', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  >
+                    <Bell size={13} />
+                    <span>Set {selectedCoin.replace('USDT', '')} Alert</span>
+                  </button>
                 </div>
 
                 <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -4323,37 +4634,138 @@ export default function App() {
             </div>
 
             <div className="material-card">
-              <h2 className="card-title">💵 Supported Binance Futures Pairs</h2>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '12px' }}>
-                Tap any coin to load its live candlestick chart and run AI multi-timeframe analysis:
-              </p>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '8px' }}>
+                <div>
+                  <h2 className="card-title" style={{ marginBottom: '2px' }}>
+                    💵 Supported Binance Pairs ({allCoins.length} Pairs)
+                  </h2>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', margin: 0 }}>
+                    35+ pairs + automatic newly launched Binance USDT pair discovery. Tap the bell icon on any pair to set a price alert.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => syncNewlyLaunchedPairs(false)}
+                    disabled={isSyncingNewPairs}
+                    style={{ fontSize: '0.76rem', padding: '6px 10px', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  >
+                    <Sparkles size={13} className={isSyncingNewPairs ? 'animate-spin' : ''} />
+                    <span>{isSyncingNewPairs ? 'Scanning Binance...' : 'Sync New Pairs'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => openAlertModalForCoin(selectedCoin)}
+                    style={{ fontSize: '0.76rem', padding: '6px 10px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  >
+                    <Bell size={13} />
+                    <span>Alerts ({priceAlerts.filter(a => !a.triggered).length})</span>
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ position: 'relative', marginBottom: '12px' }}>
+                <Search size={15} color="#94a3b8" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
+                <input
+                  type="text"
+                  className="form-input"
+                  value={pairSearchQuery}
+                  onChange={e => setPairSearchQuery(e.target.value)}
+                  placeholder="Search pair (e.g. BTC, ARB, WIF, JUP, NEW...)"
+                  style={{ paddingLeft: '36px', fontSize: '0.85rem' }}
+                />
+              </div>
 
               <div className="market-list-grid">
-                {SUPPORTED_COINS.map(c => {
-                  const p = marketPrices[c.symbol] || c.basePrice;
-                  const chg = marketChanges[c.symbol] || 0;
-                  return (
-                    <div
-                      key={c.symbol}
-                      className="market-coin-card"
-                      onClick={() => {
-                        setSelectedCoin(c.symbol);
-                        showToast(`${c.symbol} select ho gaya.`, 'info');
-                      }}
-                    >
-                      <div className="market-coin-info">
-                        <div className="m-name">{c.symbol}</div>
-                        <div className="m-pair">{c.name}</div>
-                      </div>
-                      <div className="market-coin-stats">
-                        <div className="m-price">${p.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                        <div style={{ fontSize: '0.75rem', color: chg >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: 700 }}>
-                          {chg >= 0 ? '+' : ''}{chg.toFixed(2)}%
+                {allCoins
+                  .filter(c => {
+                    const q = pairSearchQuery.trim().toLowerCase();
+                    if (!q) return true;
+                    if (q === 'new') return Boolean(c.isNewLaunch);
+                    return c.symbol.toLowerCase().includes(q) || c.name.toLowerCase().includes(q);
+                  })
+                  .map(c => {
+                    const p = marketPrices[c.symbol] || c.basePrice;
+                    const chg = marketChanges[c.symbol] || 0;
+                    const activeForCoin = priceAlerts.filter(a => a.symbol === c.symbol && !a.triggered).length;
+                    return (
+                      <div
+                        key={c.symbol}
+                        className="market-coin-card"
+                        onClick={() => {
+                          setSelectedCoin(c.symbol);
+                          showToast(`${c.symbol} select ho gaya.`, 'info');
+                        }}
+                      >
+                        <div className="market-coin-info">
+                          <div className="m-name" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span>{c.symbol}</span>
+                            {c.isNewLaunch && (
+                              <span
+                                style={{
+                                  background: 'rgba(0, 230, 118, 0.16)',
+                                  color: '#00e676',
+                                  border: '1px solid rgba(0, 230, 118, 0.4)',
+                                  fontSize: '0.62rem',
+                                  fontWeight: 800,
+                                  padding: '1px 5px',
+                                  borderRadius: '4px'
+                                }}
+                              >
+                                NEW
+                              </span>
+                            )}
+                            {activeForCoin > 0 && (
+                              <span
+                                style={{
+                                  background: 'rgba(0, 210, 255, 0.15)',
+                                  color: '#00e5ff',
+                                  fontSize: '0.62rem',
+                                  fontWeight: 800,
+                                  padding: '1px 5px',
+                                  borderRadius: '4px'
+                                }}
+                              >
+                                🔔 {activeForCoin}
+                              </span>
+                            )}
+                          </div>
+                          <div className="m-pair">{c.name}</div>
+                        </div>
+                        <div className="market-coin-stats" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <div style={{ textAlign: 'right' }}>
+                            <div className="m-price">${formatCryptoPrice(p)}</div>
+                            <div style={{ fontSize: '0.75rem', color: chg >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: 700 }}>
+                              {chg >= 0 ? '+' : ''}{chg.toFixed(2)}%
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={e => {
+                              e.stopPropagation();
+                              openAlertModalForCoin(c.symbol);
+                            }}
+                            title={`Set Price Alert for ${c.symbol}`}
+                            style={{
+                              background: activeForCoin > 0 ? 'rgba(0, 210, 255, 0.18)' : 'rgba(255,255,255,0.06)',
+                              border: '1px solid rgba(255,255,255,0.12)',
+                              borderRadius: '8px',
+                              padding: '6px',
+                              color: activeForCoin > 0 ? '#00e5ff' : '#94a3b8',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            <Bell size={14} />
+                          </button>
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             </div>
           </div>
@@ -5573,6 +5985,299 @@ export default function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Price Alerts Manager Modal */}
+      {alertsModalOpen && (
+        <div className="modal-overlay active" style={{ zIndex: 1000000 }}>
+          <div
+            className="modal-card material-card max-h-[90vh] overflow-y-auto"
+            style={{ maxWidth: '540px', width: '94%', border: '1px solid var(--accent-cyan)' }}
+          >
+            <button className="modal-close-btn" onClick={() => setAlertsModalOpen(false)}>×</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+              <BellRing size={22} color="#00e5ff" />
+              <h2 className="card-title" style={{ margin: 0 }}>Price Alerts & Target Notifications</h2>
+            </div>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+              Kisi bhi pair par target price set karein. Price hit hote hi aapko live notification, sound tone aur alert banner milega.
+            </p>
+
+            {/* Browser Notification Permission Bar */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+                background: '#0b0f19',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                marginBottom: '14px',
+                flexWrap: 'wrap'
+              }}
+            >
+              <span style={{ fontSize: '0.76rem', color: 'var(--text-secondary)' }}>
+                Push Notifications:{' '}
+                <strong style={{ color: notifPermission === 'granted' ? '#00e676' : '#ffb300' }}>
+                  {notifPermission === 'granted'
+                    ? 'Enabled'
+                    : notifPermission === 'denied'
+                      ? 'Blocked (In-App + Audio Active)'
+                      : notifPermission === 'unsupported'
+                        ? 'In-App + Audio Active'
+                        : 'Not Enabled Yet'}
+                </strong>
+              </span>
+              {notifPermission !== 'granted' && notifPermission !== 'unsupported' && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleRequestNotificationPermission}
+                  style={{ fontSize: '0.72rem', padding: '4px 10px', borderColor: 'var(--accent-cyan)', color: 'var(--accent-cyan)' }}
+                >
+                  Enable Notifications
+                </button>
+              )}
+            </div>
+
+            {/* Create New Alert Form */}
+            <form onSubmit={handleCreatePriceAlert} style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.07)', marginBottom: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                <div>
+                  <label className="form-label">Coin Pair</label>
+                  <select
+                    className="app-select"
+                    value={alertSymbol}
+                    onChange={e => {
+                      const sym = e.target.value;
+                      setAlertSymbol(sym);
+                      const p = marketPrices[sym] || allCoins.find(c => c.symbol === sym)?.basePrice || 0;
+                      if (p > 0) setAlertTargetInput(String(p));
+                    }}
+                  >
+                    {allCoins.map(c => (
+                      <option key={c.symbol} value={c.symbol}>
+                        {c.isNewLaunch ? '🆕 ' : ''}{c.symbol}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label">Condition</label>
+                  <select
+                    className="app-select"
+                    value={alertConditionMode}
+                    onChange={e => setAlertConditionMode(e.target.value as AlertConditionMode)}
+                  >
+                    <option value="AUTO">Auto (Above / Below)</option>
+                    <option value="ABOVE">Crosses Above (≥)</option>
+                    <option value="BELOW">Drops Below (≤)</option>
+                  </select>
+                </div>
+              </div>
+
+              {(() => {
+                const currentRefPrice = marketPrices[alertSymbol] || allCoins.find(c => c.symbol === alertSymbol)?.basePrice || 0;
+                return (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', flexWrap: 'wrap', gap: '6px' }}>
+                      <label className="form-label" style={{ marginBottom: 0 }}>Target Price ($)</label>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)' }}>
+                        Live: <strong>${formatCryptoPrice(currentRefPrice)}</strong>
+                      </span>
+                    </div>
+
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      className="form-input"
+                      placeholder="e.g. 90000"
+                      value={alertTargetInput}
+                      onChange={e => setAlertTargetInput(e.target.value)}
+                      required
+                      style={{ marginBottom: '8px' }}
+                    />
+
+                    {currentRefPrice > 0 && (
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                        {[-5, -2, 2, 5].map(pct => {
+                          const presetVal = currentRefPrice * (1 + pct / 100);
+                          return (
+                            <button
+                              key={pct}
+                              type="button"
+                              onClick={() => setAlertTargetInput(String(Number(presetVal.toPrecision(6))))}
+                              style={{
+                                background: pct > 0 ? 'rgba(0, 230, 118, 0.12)' : 'rgba(255, 77, 77, 0.12)',
+                                color: pct > 0 ? '#00e676' : '#ff6b8b',
+                                border: `1px solid ${pct > 0 ? 'rgba(0, 230, 118, 0.35)' : 'rgba(255, 77, 77, 0.35)'}`,
+                                borderRadius: '6px',
+                                padding: '3px 8px',
+                                fontSize: '0.72rem',
+                                fontWeight: 700,
+                                cursor: 'pointer'
+                              }}
+                            >
+                              {pct > 0 ? `+${pct}%` : `${pct}%`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+
+              <div style={{ marginBottom: '10px' }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Optional note (e.g. Breakout level, Support bounce)"
+                  value={alertNoteInput}
+                  onChange={e => setAlertNoteInput(e.target.value)}
+                  maxLength={80}
+                  style={{ fontSize: '0.82rem' }}
+                />
+              </div>
+
+              <button type="submit" className="btn-primary" style={{ width: '100%', padding: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                <Plus size={16} />
+                <span>Create Price Alert</span>
+              </button>
+            </form>
+
+            {/* Active Alerts List */}
+            <div style={{ marginBottom: '14px' }}>
+              <h4 style={{ margin: '0 0 8px', fontSize: '0.9rem', color: '#fff' }}>
+                🔔 Active Alerts ({priceAlerts.filter(a => !a.triggered).length})
+              </h4>
+              {priceAlerts.filter(a => !a.triggered).length === 0 ? (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '12px', background: '#0b0f19', borderRadius: '8px', textAlign: 'center' }}>
+                  Abhi koi active price alert nahi hai. Upar form se target set karein.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {priceAlerts.filter(a => !a.triggered).map(alert => {
+                    const liveP = marketPrices[alert.symbol] || 0;
+                    const diffPct = liveP > 0 ? ((alert.targetPrice - liveP) / liveP) * 100 : 0;
+                    return (
+                      <div
+                        key={alert.id}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '8px',
+                          background: '#0b0f19',
+                          border: '1px solid rgba(0, 210, 255, 0.22)',
+                          borderRadius: '8px',
+                          padding: '10px 12px'
+                        }}
+                      >
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <strong style={{ color: '#fff', fontSize: '0.9rem' }}>{alert.symbol}</strong>
+                            <span
+                              style={{
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                background: alert.condition === 'ABOVE' ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 77, 77, 0.15)',
+                                color: alert.condition === 'ABOVE' ? '#00e676' : '#ff6b8b'
+                              }}
+                            >
+                              {alert.condition === 'ABOVE' ? '▲ ABOVE' : '▼ BELOW'} ${formatCryptoPrice(alert.targetPrice)}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '0.73rem', color: 'var(--text-secondary)', marginTop: '3px' }}>
+                            {liveP > 0 ? `Live: $${formatCryptoPrice(liveP)} (${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(2)}% away)` : 'Waiting for live price...'}
+                            {alert.note ? ` • ${alert.note}` : ''}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePriceAlert(alert.id)}
+                          style={{ background: 'rgba(255,77,77,0.12)', border: '1px solid rgba(255,77,77,0.3)', borderRadius: '6px', padding: '6px', color: '#ff6b8b', cursor: 'pointer' }}
+                          title="Delete Alert"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Triggered Alerts History */}
+            {priceAlerts.some(a => a.triggered) && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <h4 style={{ margin: 0, fontSize: '0.9rem', color: '#00e676' }}>
+                    ✅ Triggered Alerts ({priceAlerts.filter(a => a.triggered).length})
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={handleClearTriggeredAlerts}
+                    style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: '0.75rem', cursor: 'pointer', textDecoration: 'underline' }}
+                  >
+                    Clear History
+                  </button>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {priceAlerts.filter(a => a.triggered).map(alert => (
+                    <div
+                      key={alert.id}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: 'rgba(0, 230, 118, 0.08)',
+                        border: '1px solid rgba(0, 230, 118, 0.35)',
+                        borderRadius: '8px',
+                        padding: '10px 12px'
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 800, color: '#00e676', fontSize: '0.86rem' }}>
+                          {alert.symbol} — Target ${formatCryptoPrice(alert.targetPrice)} Hit!
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                          Triggered at ${formatCryptoPrice(alert.triggeredPrice || alert.targetPrice)}
+                          {alert.triggeredAt ? ` • ${new Date(alert.triggeredAt).toLocaleTimeString()}` : ''}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleRearmPriceAlert(alert.id)}
+                          title="Re-arm Alert"
+                          style={{ background: 'rgba(0,210,255,0.14)', border: '1px solid rgba(0,210,255,0.3)', borderRadius: '6px', padding: '5px 8px', color: '#00e5ff', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer' }}
+                        >
+                          Re-arm
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePriceAlert(alert.id)}
+                          title="Delete"
+                          style={{ background: 'rgba(255,77,77,0.12)', border: '1px solid rgba(255,77,77,0.3)', borderRadius: '6px', padding: '5px', color: '#ff6b8b', cursor: 'pointer' }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
